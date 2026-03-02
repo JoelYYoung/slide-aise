@@ -6,20 +6,16 @@
 
 ## Project Overview
 
-- **Project Name**: [e.g., GenNM Related Papers]
-- **Topic Area**: [e.g., Neural Machine Translation, Program Analysis]
-- **Started**: [Date]
+- **Project Name**: AI, SE, and Compiler survey
+- **Started**: 2026
 
 ## Project Goal
 
-[Describe the goal of this paper reading project, e.g., survey a research area, understand a specific technique, etc.]
+You should read these papers/ books, and write a slide for me to make a 30 min presentation to phd students (not expert in software engineering, but knows somethign about AI and LLM).
 
 ## Papers to Read
 
-| Paper | Status | Notes |
-|-------|--------|-------|
-| [paper1.pdf] | ☐ Not Started | |
-| [paper2.pdf] | ☐ Not Started | |
+in `pdf` dir.
 
 ## Directory Structure
 
