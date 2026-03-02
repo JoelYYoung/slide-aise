@@ -227,25 +227,43 @@
     \end{columns}
 \end{frame}
 
-\begin{frame}{Agent System Categories}
-    \begin{table}
-    \small
-    \begin{tabular}{lcccc}
-    \toprule
-    \textbf{Category} & \textbf{Proactive} & \textbf{Multi-turn} & \textbf{Tool Use} & \textbf{Examples} \\
-    \midrule
-    IDE Assistants & \xmark & \xmark & \cmark & Copilot, Cursor \\
-    Task-Oriented & \cmark & \cmark & \cmark & Claude Opus 4, Jules \\
-    Planning-Centric & \cmark & \cmark & \xmark & CAMEL, CodePlan \\
-    Multi-Agent & \cmark & \cmark & \cmark & ChatDev, SWE-Agent \\
-    \bottomrule
-    \end{tabular}
-    \end{table}
+\begin{frame}{Agent Evolution: From Reactive to Autonomous}
+    \begin{center}
+    \begin{tikzpicture}[scale=0.85, every node/.style={scale=0.85}]
+        % Timeline arrow
+        \draw[->, very thick, gray] (-0.5,0) -- (12,0);
+        
+        % Stage 1
+        \node[draw, rounded corners, fill=lightgray, minimum width=2.8cm, minimum height=1.8cm, align=center] (s1) at (1.5,2) {\textbf{Code Completion}\\{\small Reactive}\\{\small Single-turn}};
+        \draw[->, thick] (s1) -- (1.5,0.3);
+        \node[below] at (1.5,-0.3) {\small 2021};
+        
+        % Stage 2
+        \node[draw, rounded corners, fill=primaryblue!20, minimum width=2.8cm, minimum height=1.8cm, align=center] (s2) at (5.5,2) {\textbf{Chat Assistants}\\{\small Multi-turn}\\{\small Tool-augmented}};
+        \draw[->, thick] (s2) -- (5.5,0.3);
+        \node[below] at (5.5,-0.3) {\small 2023};
+        
+        % Stage 3
+        \node[draw, rounded corners, fill=successgreen!20, minimum width=2.8cm, minimum height=1.8cm, align=center] (s3) at (9.5,2) {\textbf{Autonomous Agents}\\{\small Proactive}\\{\small Adaptive}};
+        \draw[->, thick] (s3) -- (9.5,0.3);
+        \node[below] at (9.5,-0.3) {\small 2025+};
+        
+        % Examples
+        \node[font=\footnotesize, gray] at (1.5,-1) {Copilot v1};
+        \node[font=\footnotesize, gray] at (5.5,-1) {Cursor, ChatGPT};
+        \node[font=\footnotesize, gray] at (9.5,-1) {Claude Agent, SWE-Agent};
+    \end{tikzpicture}
+    \end{center}
     
-    \vspace{1em}
-    \begin{alertblock}{Trend}
-    From reactive code completion → autonomous, multi-agent software development
-    \end{alertblock}
+    \vspace{0.5em}
+    \begin{block}{Key Capabilities of Modern Agents}
+    \begin{itemize}
+        \item \textbf{Proactive}: Decompose tasks, plan ahead, initiate sub-tasks
+        \item \textbf{Multi-turn}: Maintain context across interactions
+        \item \textbf{Tool-augmented}: Integrate compilers, debuggers, test frameworks
+        \item \textbf{Adaptive}: Learn from feedback, revise strategies
+    \end{itemize}
+    \end{block}
 \end{frame}
 
 %=============================================================================
@@ -286,53 +304,44 @@
     \end{columns}
 \end{frame}
 
-\begin{frame}{LLM Methodology Spectrum}
+\begin{frame}{LLM-Compiler Applications: Success Stories}
     \begin{columns}[T]
     \column{0.5\textwidth}
-    \textbf{Training-Required}
+    \textbf{\faRocket~Code Transpilation}
     \begin{itemize}
-        \item Domain-specific pre-training
-        \item Supervised fine-tuning (SFT)
-        \item Reinforcement learning
+        \item C → Rust (memory safety)
+        \item CUDA → HIP (portability)
+        \item Legacy COBOL → Modern langs
     \end{itemize}
     
-    \textbf{Pros:}
+    \vspace{0.3em}
+    \textbf{\faMemory~IR Optimization}
     \begin{itemize}
-        \item High specialized performance
-        \item Knowledge internalized
-    \end{itemize}
-    
-    \textbf{Cons:}
-    \begin{itemize}
-        \item Data curation cost
-        \item Low flexibility (task-locked)
+        \item \textbf{LLMCompiler}: Pre-trained on LLVM IR
+        \item Flag/pass selection (replacing heuristics)
+        \item Code size reduction
     \end{itemize}
     
     \column{0.5\textwidth}
-    \textbf{Training-Free}
+    \textbf{\faMicrochip~Hardware Synthesis}
     \begin{itemize}
-        \item Prompt engineering (CoT)
-        \item Retrieval-Augmented Generation
-        \item Agentic workflows
+        \item Natural language → Verilog/VHDL
+        \item High-level synthesis optimization
     \end{itemize}
     
-    \textbf{Pros:}
+    \vspace{0.3em}
+    \textbf{\faBug~Automated Repair}
     \begin{itemize}
-        \item High flexibility
-        \item Quick adaptation
-    \end{itemize}
-    
-    \textbf{Cons:}
-    \begin{itemize}
-        \item Depends on base model
-        \item Inference overhead
+        \item Bug fix as translation task
+        \item Compiler error → fix suggestion
+        \item Test-driven repair loops
     \end{itemize}
     \end{columns}
     
     \vspace{0.5em}
-    \begin{block}{Best Practice}
-    Combine both: SFT for specialization + agentic workflow with RAG for flexibility
-    \end{block}
+    \begin{exampleblock}{Key Insight}
+    LLMs excel at tasks requiring \textbf{cross-domain knowledge} that traditional compilers cannot encode.
+    \end{exampleblock}
 \end{frame}
 
 \begin{frame}{Code Abstraction Levels \& Tasks}
@@ -362,141 +371,42 @@
     \end{itemize}
 \end{frame}
 
-%=============================================================================
-\section{Compiler.next: Intent Compilation}
-%=============================================================================
-
-\begin{frame}{Software Engineering Evolution}
-    \begin{center}
-    \begin{tikzpicture}[scale=0.85, every node/.style={scale=0.85, align=center}]
-        \node[draw, rounded corners, fill=lightgray, minimum width=3cm] (se1) at (0,0) {\textbf{SE 1.0}\\Traditional};
-        \node[draw, rounded corners, fill=primaryblue!20, minimum width=3cm] (se2) at (5,0) {\textbf{SE 2.0}\\ML/DL Era};
-        \node[draw, rounded corners, fill=successgreen!20, minimum width=3cm] (se3) at (10,0) {\textbf{SE 3.0}\\AI-Native};
-        
-        \draw[->, thick] (se1) -- (se2);
-        \draw[->, thick] (se2) -- (se3);
-    \end{tikzpicture}
-    \end{center}
-    
-    \vspace{1em}
-    \begin{columns}[T]
-    \column{0.33\textwidth}
-    \textbf{SE 1.0}
-    \begin{itemize}
-        \item Human writes code
-        \item Static compilation
-        \item Deterministic
-    \end{itemize}
-    
-    \column{0.33\textwidth}
-    \textbf{SE 2.0}
-    \begin{itemize}
-        \item ML models assist
-        \item Neural networks
-        \item Data-driven decisions
-    \end{itemize}
-    
-    \column{0.33\textwidth}
-    \textbf{SE 3.0}
-    \begin{itemize}
-        \item \alert{Intent} → Software
-        \item FM as ``probabilistic CPU''
-        \item Prompts as ``binaries''
-    \end{itemize}
-    \end{columns}
-\end{frame}
-
-\begin{frame}{What is FMware?}
-    \begin{block}{Definition}
-    \textbf{FMware} = Foundation Model-powered Software
+\begin{frame}{Compiler.next: Intent → Optimized FMware}
+    \begin{block}{Core Idea}
+    Treat \textbf{human intent} as source code, compile it into optimized \textbf{FMware} (prompts + RAG + configs).
     \end{block}
     
-    \begin{columns}[T]
-    \column{0.5\textwidth}
-    \textbf{Types:}
-    \begin{itemize}
-        \item \textbf{Promptware}: Prompts interface with FMs
-        \item \textbf{Agentware}: Autonomous agents with FMs
-    \end{itemize}
-    
-    \vspace{0.5em}
-    \textbf{Components:}
-    \begin{itemize}
-        \item RAG pipelines
-        \item Guardrails
-        \item Agent orchestration
-        \item Data flywheel
-    \end{itemize}
-    
-    \column{0.5\textwidth}
-    \textbf{Cognitive Architecture}
-    \begin{itemize}
-        \item FM Call (basic)
-        \item FM Chain (sequential)
-        \item Router Agent
-        \item Autonomous Agents
-    \end{itemize}
-    \end{columns}
-    
-    \begin{alertblock}{Challenge}
-    FMware is much more than just prompts — it's an entire ecosystem of components.\strut
-    \end{alertblock}
-\end{frame}
-
-\begin{frame}{Compiler.next: Search-Based Intent Compilation}
     \begin{center}
-    \begin{tikzpicture}[scale=0.75, every node/.style={scale=0.75}]
-        % Input
-        \node[draw, rounded corners, fill=primaryblue!20, minimum width=2.5cm] (intent) at (0,0) {Human Intent};
+    \begin{tikzpicture}[scale=0.7, every node/.style={scale=0.7}]
+        \node[draw, rounded corners, fill=primaryblue!20, minimum width=2.2cm] (intent) at (0,0) {Human Intent};
+        \node[draw, rounded corners, fill=accentorange!20, minimum width=2.5cm] (compiler) at (4.5,0) {Compiler.next};
+        \node[draw, rounded corners, fill=successgreen!20, minimum width=2.2cm] (fmware) at (9,0) {Optimized FMware};
         
-        % Compiler box
-        \node[draw, rounded corners, fill=accentorange!10, minimum width=5cm, minimum height=3cm] (compiler) at (5,0) {};
-        \node at (5,1) {\textbf{Compiler.next}};
-        \node[font=\small] at (5,0) {Search-Based};
-        \node[font=\small] at (5,-0.5) {Multi-Objective};
-        \node[font=\small] at (5,-1) {Optimization};
-        
-        % Output
-        \node[draw, rounded corners, fill=successgreen!20, minimum width=2.5cm] (fmware) at (10,0) {Optimized FMware};
-        
-        % Arrows
         \draw[->, thick] (intent) -- (compiler);
         \draw[->, thick] (compiler) -- (fmware);
         
-        % Gold labels
-        \node[draw, rounded corners, fill=lightgray, minimum width=2cm] (gold) at (5,-3) {Gold Labels};
+        \node[draw, rounded corners, fill=lightgray, minimum width=1.5cm, font=\small] (gold) at (4.5,-1.5) {Test Cases};
         \draw[->, dashed] (gold) -- (compiler);
     \end{tikzpicture}
     \end{center}
     
-    \textbf{Key Innovation:}
+    \begin{columns}[T]
+    \column{0.5\textwidth}
+    \textbf{Key Mechanisms:}
     \begin{itemize}
-        \item Transform \textbf{intent} into optimized \textbf{FMware} (prompts, configs, RAG)
+        \item Search-based optimization (NSGA-II)
         \item Multi-objective: accuracy vs cost vs latency
-        \item Uses NSGA-II genetic algorithm for search
-        \item Semantic caching for efficiency
+        \item Self-reflection \& semantic caching
     \end{itemize}
-\end{frame}
-
-\begin{frame}{Compiler.next: Search Mechanism}
-    \begin{enumerate}
-        \item \textbf{Fill Template}: Instantiate prompt with problem data
-        \item \textbf{Inference}: Execute with release-FM
-        \item \textbf{Evaluate}: Compare against gold labels (unit tests)
-        \item \textbf{Self-Reflection}: Generate feedback on failures
-        \item \textbf{Aggregate Scores}: Fitness across all problems
-        \item \textbf{Selection}: Pareto-optimal candidates (NSGA-II)
-        \item \textbf{Crossover}: Combine parent templates via FM
-        \item \textbf{Mutation}: Modify offspring via FM
-    \end{enumerate}
     
-    \vspace{0.5em}
-    \begin{exampleblock}{Results on HumanEval-Plus}
+    \column{0.5\textwidth}
+    \textbf{Results (HumanEval-Plus):}
     \begin{itemize}
-        \item GPT-4o-mini: Accuracy +47\%, Latency -42\%, Tokens -16\%
-        \item Caching: 22\% compilation speedup
+        \item Accuracy: \textcolor{successgreen}{+47\%}
+        \item Latency: \textcolor{successgreen}{-42\%}
+        \item Token usage: \textcolor{successgreen}{-16\%}
     \end{itemize}
-    \end{exampleblock}
+    \end{columns}
 \end{frame}
 
 %=============================================================================
@@ -647,39 +557,28 @@
 \begin{frame}{Research Directions}
     \begin{columns}[T]
     \column{0.5\textwidth}
-    \textbf{Compiler.next Calls for Action:}
-    \begin{enumerate}
-        \item Quality programming constructs for FMware
-        \item End-to-end FMware optimization
-        \item Effective search heuristics
-        \item Gold label construction
-        \item Quality range estimation
-        \item Efficiency \& cost reduction
-        \item Reproducible compilations
-        \item Multi-objective optimization
-        \item Interoperability between compilers
-        \item Community trace sharing
-    \end{enumerate}
-    
-    \column{0.5\textwidth}
-    \textbf{AI for SE Paths Forward:}
+    \textbf{AI for SE:}
     \begin{itemize}
         \item Automatic data curation
-        \item RL for code (environment design)
-        \item Semantic-aware embeddings
-        \item Integration with SWE frameworks
+        \item RL for code optimization
         \item Better tool interfaces
-        \item Human-AI collaboration training
+        \item Human-AI collaboration
     \end{itemize}
     
-    \vspace{0.5em}
+    \column{0.5\textwidth}
     \textbf{New Compiler Stack:}
     \begin{itemize}
-        \item Hybrid systems (training + inference)
+        \item Hybrid systems (LLM + traditional)
         \item Self-improving compilers
         \item Cross-level transformations
+        \item Reproducible FM compilations
     \end{itemize}
     \end{columns}
+    
+    \vspace{1em}
+    \begin{block}{Common Theme}
+    Bridge the gap between LLM flexibility and traditional compiler reliability.
+    \end{block}
 \end{frame}
 
 \begin{frame}{The Hybrid Future}
@@ -712,9 +611,7 @@
     \begin{enumerate}
         \item \textbf{AI is transforming SE} — from code completion to autonomous agents
         
-        \item \textbf{Multiple integration patterns} — LLM as selector, translator, or generator
-        
-        \item \textbf{Intent-based development} — Compiler.next: intent → optimized FMware
+        \item \textbf{LLMs in Compilers} — selector/translator/generator patterns; intent → optimized FMware
         
         \item \textbf{Significant challenges remain}:
         \begin{itemize}
