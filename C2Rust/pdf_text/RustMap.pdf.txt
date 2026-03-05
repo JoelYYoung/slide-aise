@@ -1,0 +1,2045 @@
+5
+2
+0
+2
+
+r
+a
+
+M
+2
+2
+
+]
+E
+S
+.
+s
+c
+[
+
+1
+v
+1
+4
+7
+7
+1
+.
+3
+0
+5
+2
+:
+v
+i
+X
+r
+a
+
+RustMap: Towards Project-Scale C-to-Rust
+Migration via Program Analysis and LLM
+
+Xuemeng Cai1, Jiakun Liu1, Xiping Huang1, Yijun Yu2, Haitao Wu3,
+Chunmiao Li4, Bo Wang5, Imam Nur Bani Yusuf1, and Lingxiao Jiang1
+
+1 Singapore Management University
+{xuemengcai,jkliu,xphuang,imamy.2020,lxjiang}@smu.edu.sg
+2 The Open University y.yu@open.ac.uk
+3 Independent Researcher wain303009@hotmail.com
+4 Beijing Academy of Blockchain and Edge Computing chunmiaoli1993@gmail.com
+5 Beijing Jiaotong University wangbo_cs@bjtu.edu.cn
+
+Abstract. Migrating existing C programs into Rust is increasingly de-
+sired, as Rust offers superior memory safety while maintaining C’s high
+performance. However, vastly different features between C and Rust,
+e.g., distinct definitions and usages of pointers and references, pose sig-
+nificant challenges beyond mere syntactic translation. Existing auto-
+mated translation tools, such as C2Rust, may rely too much on syn-
+tactic, template-based translation and generate unsafe Rust code that
+is hard for human developers to read, maintain, or even compile. More
+semantic-aware translation that produces safer, idiomatic, and runnable
+Rust code is much needed. This paper introduces a novel dependency-
+guided and large language model (LLM)-based C-to-Rust translation
+approach, RustMap, based on three key ideas: (1) Utilize LLM’s capa-
+bilities to produce idiomatic Rust code from given small pieces of C code,
+(2) Mitigate LLM’s incapability in handling large codebases by break-
+ing project-scale C programs into smaller units for translation according
+to their usage dependencies, and later composing them together into a
+runnable Rust program, and (3) Enhance the correctness of the trans-
+lated Rust program by utilizing available test cases to check input/output
+equivalence between C and Rust code, isolating faulty code when pro-
+gram execution states deviate, and iteratively utilizing the feedback from
+compilation and testing errors for LLM to refine translated Rust code.
+We have empirically evaluated RustMap on 126 sample real-world pro-
+grams, including 125 programs from Rosetta Code and a complex bzip2
+program containing more than 7000 lines of code, using GPT-4o as the
+LLM. RustMap shows promising results in guiding GPT-4o to translate
+most of the C code into more idiomatic, readable, and functional Rust
+code with significantly less unsafe code than other translation tools, pre-
+senting non-trivial translation patterns that may be reusable for future
+research. Our study also identifies typical cases that are difficult for other
+tools when translating C code into Rust and presents possible solutions
+constructed by RustMap that may be reusable for future research.
+
+Keywords: Program translation · C-to-Rust · C2Rust · Dependency
+analysis · Large language model · LLM.
+
+ 
+ 
+ 
+ 
+ 
+ 
+2
+
+1
+
+Cai et al.
+
+Introduction
+
+Rust is increasingly popular as it not only offers better safety guarantees but
+also has performance on par with that of C [4,48]. In industry, there is a growing
+trend to rewrite existing C projects in Rust [7,29,53], including the Linux kernel
+[58, 59]. To help developers to translate C code into Rust, several tools have
+been proposed. For example, C2Rust [40] aims to automatically convert C code
+to Rust with mostly syntax-based rules. However, such tools often produce too
+much unsafe code that is not idiomatic in Rust and hard to read or maintain
+since C and Rust languages have very different features, e.g., object ownership
+and lifetime rules. To tackle the drawbacks, more tools, such as CRustS [37],
+Crown [67], and Laertes [17,18], have been proposed on top of C2Rust to analyze
+specific C & Rust language features and enhance transformation between them.
+However, due to the lack of one-to-one syntactic mapping between C and Rust
+language features (e.g., incompatible data types, macros, vastly different usages
+of pointers and references, language-specific programming idioms, and Rust-
+specific ownership and lifetime rules), translation between them is not trivial
+and these tools are still very limited in translating diverse code patterns, and
+the translated Rust code still contain lots of unsafe code blocks that are hard
+to read, maintain, or even compile—Challenge 1○. In addition, these tools often
+fail to translate project-scale C programs to produce executable Rust programs,
+due to inadequate management of various kinds of dependencies among code,
+such as language-specific libraries, linker files, global data types and variables
+defined in many header files scattered across different locations in the project
+but dependent on by a piece of code to be translated. When a C project is
+translated to Rust, the resultant Rust project structure should accommodate all
+the dependent code from C to ensure their compilation and execution—Challenge
+2○. Also, the translated Rust code should naturally be functionally equivalent
+to the original C code—Challenge 3○,6 i.e., producing the same outputs when
+executed with the same input.
+
+To address these challenges, we propose a novel LLM-prompting-based trans-
+lation approach guided by program dependency analyses, named RustMap.
+We utilize the capabilities of a LLM (specifically ChatGPT [24, 56]) for code
+translation [63] since LLMs has recently shown great potentials in software engi-
+neering tasks, including code-to-code translation [63], code-to-text summariza-
+tion [1, 8, 43], and text-to-code search and generation [5, 16, 23, 62], although
+LLMs are not yet able to handle large input and the code produced by LLMs
+can be buggy [38,45]. To deal with LLM’s limits in handling large input data and
+avoiding bugs [38,45], RustMap utilizes program dependency analyses and func-
+tional testing, combined with customized prompts, to extend LLM’s translation
+capabilities to project-scale programs.
+
+Specifically, RustMap first breaks down a C program into relatively smaller
+and standalone translation units, which can be a global variable definition, a
+datatype struct definition, a macro, a preprocessor directive, a function, or a set
+
+6 except for the cases when the C code contains bugs.
+
+RustMap: Project-Scale C-to-Rust Migration
+
+3
+
+of inter-dependent functions, by utilizing both static and dynamic analyses of
+the C source code and a given set of functional test cases. Then RustMap deter-
+mines the translation order of these units according to their dependencies, based
+on the function execution sequences during tests, with additional considerations
+from the syntactic structures and control flows in source code. It constructs a
+Rust project that contains sufficient Rust files or modules to hold all the code
+translated from the translation units for the whole-program translation. This
+dependency-guided break-down of C programs and construction of Rust project
+structures, which we call project scaffolding tackles the Challenges 1○ and 2○:
+(1) Suitable prompts for each translation unit are formulated and fed to Chat-
+GPT for translation, utilizing ChatGPT’s capabilities in producing functionally
+the same, but syntactically different code, so that the translated Rust code can
+be safer and more idiomatic. (2) With the broken-down smaller and relatively
+standalone translation units, RustMap makes it possible to apply LLMs to large
+programs. For Challenge 3○, RustMap also utilizes the functional tests together
+with ChatGPT to enhance the correctness of translated Rust code: Whenever
+there are compilation or testing errors in the translated Rust, the error infor-
+mation, either compilation error messages or code execution states, is extracted
+and formulated as suitable prompts for ChatGPT to locate and adjust faulty
+translated code until the code passes the provided functional tests or time out.
+Individual translated units in Rust are composed together according to the de-
+pendencies of their counterparts in C to complete the whole-program migration.
+Thus, RustMap provides an operational roadmap for translating project-scale C
+programs into Rust through a LLM-prompting-based, dependency-guided trans-
+lation process to enhance the correctness, readability, safety, executability of
+translated Rust programs.
+
+We have evaluated RustMap on 126 real-world C programs ranging from tens
+of lines to more than 7000 lines of code, including sample Rosetta Code [42],
+and a file compression program bzip2 [51]. Our results show that RustMap can
+translate most of the C programs into idiomatic Rust programs without the need
+of defining specific transformation rules. Most programs translated by RustMap
+are compilable and runnable, passing a set of functional tests, indicating the same
+functionalities as the original C programs. RustMap also significantly reduces
+unsafe code and improves readability in the translated programs when compared
+with other translation tools.
+
+Our study also empirically identifies a number of typical cases that fail to
+be translated by other tools (e.g., C2Rust), and provides solutions constructed
+by RustMap. For example, RustMap identifies C pointers that can often be
+rewritten as vectors in Rust, pointer aliasing that can be replaced by memory
+copies, global variables that need to be wrapped into safer lazy_static blocks, and
+C-style switch-cases with fall-through that need to be converted into Rust-style
+while loops with match statements.
+
+In short, the main contribution of our paper is RustMap, a novel dependency-
+guided, LLM-prompting-based approach for project-scale C to Rust translation.
+It leverages functional testing and dependency analyses to guide the project-
+
+4
+
+Cai et al.
+
+Fig. 1: Overview of RustMap
+
+scale translation process, utilizes LLMs to perform actual translation, produces
+more idiomatic and safer code than other tools, and enhance the correctness of
+translated code. Our evaluation on small to medium real-world C programs of
+various complexities shows the advantages of our approach against other trans-
+lation tools. Although not without limitations, our approach and the translated
+Rust code for typical difficult cases faced by other tools provide meaningful and
+reusable solutions for future research and tools. Our code and translation results
+are publicly available at https://github.com/Cxm211/RustMap.
+
+Paper organization. The remainder of this paper is organized as follows:
+Section 2 provides an overview of RustMap. Section 3 introduces the project-
+level organization of translated code. Section 4 describes more details about
+translating C code into Rust using LLM. Section 5 evaluates our approach. It
+also presents typical cases that are challenging for automatic translation, and
+discusses our limitations and threats to validity. Section 6 reviews related work.
+Section 7 concludes with future work.
+
+2 RustMap Overview
+
+Figure 1 illustrates an overview of RustMap. We focus on migrating a C project
+to Rust by translating C functions and their dependencies one by one. Given a C
+project, RustMap first generates a Rust project scaffolding where each C header
+file and each C function is mapped to a Rust file; the Rust files are initially empty,
+but when more C functions or header file contents are translated, the translated
+code will gradually be merged into the files. RustMap also preprocesses the
+C files, compiles the whole program, and run its available tests, which provides
+static and dynamic call graphs to identify the dependencies of each function (e.g.,
+other functions, data types, global variables, and macros used by it). Sections
+3.1 and 3.2 have more details.
+
+Then, RustMap determines the units for translation and their translation
+order based on dependencies among code elements. Each translation unit may
+have one or many code elements, such as struct definitions, global variables,
+macros, a function definition, a statement, etc. The translation units and order
+can be adjusted according to LLM’s outputs (e.g., when ChatGPT identifies
+more dependent code elements to be translated). Section 3.3 has more details.
+
+SMU Classification: RestrictedC projectProject-scalescaffoldingDetermine translation units & ordersRust programFeedback& PromptsCompilationcheckFunctionality checkChatGPTRust project structurePreprocessing & test executionsRustMap: Project-Scale C-to-Rust Migration
+
+5
+
+A translation unit (e.g., a function and its dependencies) along with custom
+prompts is fed to LLM for translation (see Section 4.1). If LLM fails to produce
+translated Rust code, we try again with another translation unit or adjust the
+translation unit (e.g., splitting a large unit into smaller ones) according to its
+outputs. When the LLM produces Rust code for the unit, RustMap applies the
+Rust compiler to check its syntactic correctness. If there were any compilation
+errors in the translated code, RustMap will try to fix them by using the error
+messages as additional prompts to LLM and instructing ChatGPT to retranslate
+the code and fix the given error (see Section 4.3).
+
+When all the units needed to run a given test have been translated, RustMap
+will try to compile them together to produce an executable Rust program. Sim-
+ilar to the above, if there were any compilation errors in the translated code,
+RustMap will try to fix them by using the error messages as additional prompts
+to LLM. RustMap will execute the compiled Rust program with the given test
+input and compare its execution states with those of the original C program
+executed with the same test input to identify any semantic differences. If there
+was any difference, RustMap will try to locate the error and fix it by using the
+execution state context as additional prompts to LLM and instructing ChatGPT
+to retranslate the code so that the execution states in the translated Rust code
+can match their C counterparts (see Section 4.4).
+
+As a result, RustMap will generate a project-scale Rust program with suf-
+ficient C functions and their dependencies translated so that it can run the
+same given tests to produce the same outputs, while maintaining close mapping
+between the original C functions and the translated Rust code.
+
+3 Project-Scale Scaffolding
+
+A project can contain a large amount of code, and it is impractical to translate
+the code all at once. When translating a C project to a Rust project, we tem-
+porarily organize the C project in a way that allows each C function and/or its
+relevant dependencies to be translated separately. For this purpose, we need to
+identify the boundaries of translation units where each unit is a set of C code
+and/or their dependencies to be translated together, and determine the order in
+which they can be translated. We also construct a Rust project containing tem-
+porary files corresponding to the translation units, to save intermediate trans-
+lation results, track dependencies, and prepare for integrated compilation and
+execution of the whole translated Rust program. We refer to such preparations
+as scaffolding. The folders and files generated during scaffolding are temporary,
+mainly for managing the translation units, and will be merged together so that
+the final Rust project structure closely matches the original C project file/folder
+structure. The following subsections detail the preparations.
+
+3.1
+
+Initial Rust Project Structure
+
+Our overarching idea is to use a function and/or its dependencies as a translation
+unit and translate one or multiple units at a time as long as the LLM can handle
+
+6
+
+Cai et al.
+
+them. We use functions as translation units mainly because C programs start
+executions from their main functions and functions are often natural modular
+units of code and have well-defined interfaces and dependencies.7 By translating
+functions individually, it is easier to trace and resolve their dependencies, and
+easier to integrate translated functions into the Rust project following the C
+project structure.
+
+We use the cargo new command to initialize a Rust project. The command
+generates a Cargo.toml file, which contains the metadata about the project and its
+dependencies. The metadata will be updated when new Rust files are generated
+during the translation and is used to compile and run the project. After doing
+so, the project is initialized with the necessary files and directories, meanwhile,
+can be built and run. For each .c file in the given C project, we automatically
+map the C file to a set of Rust .rs files. Each Rust file corresponds to either a
+function from the C file, or a set of global variables, data types, or preprocessor
+directives and macros 8 defined in the C file, and is put in a directory of the
+same name (without the .c suffix) as the C file. For each .h header file in the
+C project, a corresponding .rs file is also generated and placed in the headers
+folder to be shared across the project. If a .h file also happens to include function
+definitions (in addition to function declarations), those functions are processed
+in the same way as .c files.
+
+Figure 2 is a sample generated Rust project scaffolding for the bzip2 program
+used in our evaluation, where various scaffolding folders and files are created for
+storing code according to either globals, functions, or headers that will be han-
+dled as translation units. The scaffolding files can be merged or split during
+translation, depending on how well LLM handles the translation units. For ex-
+ample, the global variable definitions in blocksort.c file will be translated and
+put into the global_vars/globals_blocksort.rs file in Rust; the BZ2_blockSort function
+in the C file will be translated and put into the blocksort/BZ2_blockSort.rs file; etc.
+For another example, the bzlib_private.h file will be translated and put into the
+headers/bzip2_private.rs file in Rust; since it includes bzlib.h in C, the translated
+bzlib_private.rs file will include mod bzlib; so that it can use code elements defined
+in headers/bzlib.rs.
+
+3.2 Handling C Preprocessor Directives
+
+A C file can include many kinds of preprocessor directives, e.g., #include for file
+inclusions, #define for macro definition, #if for conditional compilation, #pragma
+for specific compilation features, etc., which may bring many challenges when
+being translated into Rust. To the best of our knowledge, all prior C-to-Rust
+translation tools use C’s preprocessor to turn a .c file into a .i file so that all
+
+7 For functions longer than the input length limit of LLM, we divide function bod-
+ies and their dependencies into smaller but syntactically complete statements for
+translation.
+
+8 Note that we handle some of these code elements differently from others for better
+
+code safety and readability (see Sections 3.2 and 5.2).
+
+RustMap: Project-Scale C-to-Rust Migration
+
+7
+
+Fig. 2: An example of project scaffolding structure
+
+directives are preprocessed and removed so that they do not actually translate
+directives. However, preprocessed directives, especially macro expansions, can
+lead to much bloated code from the included libraries and much repetitive code
+that is less readable. It would be beneficial for users if the directives and macros
+can be translated to corresponding Rust code elements as much as possible to
+retain code readability and maintainability.
+
+Thus, for each .c file, we treat all the preprocessor directives as a translation
+unit, together with other code elements from the file that may directly depend
+on them according to a simple def-use static analysis, and feed them into LLM.
+The unit may be split according to the def-use dependency order9 if it is too
+large to fit in the length limit of LLM.
+
+Handling file inclusions When the directives include commonly used libraries,
+such as #include <stdlib.h>, we observe that ChatGPT can recognize the functions
+and macros defined in the libraries and used in the C code to be translated, and
+replace those C functions and macros with appropriate Rust library functions
+and macros. Thus, we can leave out such directives from further processing.
+
+For directives that include project-specific header files, e.g., #include "bzlib.h",
+we will translate each header file and replace the directive with a mod declaration
+(translated as mod bzlib;) in the corresponding scaffolding file and later add a use
+statement if an element from the header file is used somewhere (see Section 4.2),
+to indicate the dependencies.
+
+9 Intuitively, we handle the declarations or definitions of directives first before handling
+
+other code elements that use the definitions.
+
+8
+
+Cai et al.
+
+Handling C Macros The existing tool C2Rust [28] preprocesses C programs
+before translating C files to Rust. Thus, C2Rust expands all macro uses into
+concrete C code, including primitive-type numerical macros, complex macros
+[14], and others, leading to duplicate and less readable code. For better code
+readability and alignment with the original C code, we propose to retain the
+macro definitions as much as possible based on LLM’s capabilities in translating
+some of C macros to Rust macros and simple rule-based refactoring.
+
+Replacing numerical macros with const global variables. For primitive-type nu-
+merical macros, we use LLM to infer the data type of each numerical value and
+use rule-based automation to rewrite them into const global variables in Rust.
+A detailed example of this transformation can be found in the corresponding
+section10 in our Github repository. Figure 3 shows sample numerical macros and
+their refactoring and translations. For example, #define BZ_RUNB 1 is refactored to
+const int BZ_RUNB=1; in C, and later translated to const BZ_RUNB:i32=1; in Rust. The
+refactor C code and the translated Rust code would both keep using the vari-
+able BZ_RUNB instead of the value 1, while C2Rust directly puts the value into the
+translated code, lowing code readability. Figure 3b shows these macros rewrit-
+ten as constant global variables in C, and Figure 3c shows them rewritten as
+constant global variables in Rust.
+
+# define BZ_RUNB 1
+# define BZ_M_IDLE 1
+# define BZ_S_OUTPUT 1
+
+const int BZ_RUNB =1;
+const int BZ_M_IDLE =1;
+const int BZ_S_OUTPUT =1;
+
+const BZ_RUNB : i32 =1;
+const BZ_M_IDLE : i32 =1;
+const BZ_S_OUTPUT : i32 =1;
+
+(a) Sample Numerical Macros
+in C
+
+(b) Rewritten as const global
+variables in C
+
+(c) Rewritten as global variables
+in Rust
+
+Fig. 3: Sample Translations of Numerical Macros
+
+Replacing complex macros with functions. There can be complex macros, such
+as “ #define GET_MTF_VAL(label1,label2,lval) ...”, that accept arguments and implement
+complex logic and are reused many times in C code. For better code readability
+and alignment with the original C code again, we rewrite the complex macros
+as the functions that have the same names as the macros by using LLM before
+applying our translation to the code using such macros. Note that the argu-
+ments in complex macros are not typed and will be merely determined by the
+values passed to the macro when used. Therefore, when we prompt11 ChatGPT
+to rewrite the macro as a function, we also provide the code of the functions
+that use the macro, and instruct ChatGPT to replace the macro use with a
+function call if possible. Taking the functions that use the macro as the con-
+text, ChatGPT is able to infer the data types of the macro arguments. Finally,
+
+10 https://github.com/Cxm211/RustMap/blob/main/README_example.md
+11 https://github.com/Cxm211/RustMap/blob/main/prompt-templates/macro-tra
+
+nslation.txt
+
+RustMap: Project-Scale C-to-Rust Migration
+
+9
+
+the complex macros are replaced with the new functions, and the code using
+the macro is updated with the function call. The corresponding section10 in our
+repo provides a detailed example of complex macro handling. Figure 4 shows
+an example, where one complex marco fswap(zz1, zz2) is converted to a function
+fswap(UInt32* zz1, UInt32* zz2).
+
+# define fswap ( zz1 , zz2 ) \
+{ Int32 zztmp = zz1 ; zz1 = zz2 ; zz2 = zztmp ; }
+
+static void fswap ( UInt32 * zz1 , UInt32 * zz2 ) {
+
+UInt32 zztmp = * zz1 ;
+* zz1 = * zz2 ;
+* zz2 = zztmp ;
+
+}
+
+static
+void fallbackQSort3 ( UInt32 * fmap ,
+
+static
+void fallbackQSort3 ( UInt32 * fmap ,
+
+UInt32 * eclass ,
+Int32
+Int32
+
+loSt ,
+hiSt )
+
+{
+
+}
+
+...
+if ( n == 0) {
+
+fswap ( fmap [ unLo ] , fmap [ ltLo ]);
+ltLo ++; unLo ++;
+continue ;
+
+};
+...
+
+UInt32 * eclass ,
+Int32
+Int32
+
+loSt ,
+hiSt )
+
+{
+
+}
+
+...
+if ( n == 0) {
+
+fswap (& fmap [ unLo ] , & fmap [ ltLo ]);
+ltLo ++; unLo ++;
+continue ;
+
+}
+...
+
+(a) One Complex Macro in C
+
+(b) Rewritten as a function in C
+
+Fig. 4: Preprocess of Complex Macros
+
+Note that there are also macros that would correspond to syntactically invalid
+C code by itself, which are allowed by C but not allowed by Rust, and cannot
+be easily rewritten as simple variables or functions. It would be challenging to
+still retain such macros during translation, and we opted to apply the usual C
+preprocessor to expand such macros like other unhandled directives below.
+
+Unhandled conditional compilations and other directives Although many
+preprocessor directives can be translated by LLM, there are still many other di-
+rectives (e.g., #if, #pragma, #line, etc.) that may depend on system environment set-
+tings and require specialized handling and more advanced Rust macro features if
+to be retained and translated to Rust. Moreover, many macro definitions inside
+#if depend on system environment variables, which can only be determined how
+these macros are preprocessed at compile time. One example of unhandled direc-
+tives is provided in the examples section10 in our repo. For example, #ifdef _WIN32
+is often used to check whether the code is being compiled on a Windows system,
+allowing conditional compilation of platform-specific implementations, and the
+value of _WIN32 would be automatically defined by the compiler when targeting a
+Windows platform.
+
+To ensure the generation of compilable and executable Rust programs when
+LLM fails to translate such diverse directives, we use the same approach of
+other C-to-Rust translation tools, by preprocessing the directives using the GCC
+preprocessor to remove them or expand them into usual C code so that they can
+be translated with other code. As a result, for each C file (.c or .h), we will have
+
+10
+
+Cai et al.
+
+a preprocessed C file (.i) that contains only usual C code and the directives that
+can be translated. Such .i files from the given C project can still be compiled,
+executed with test cases, and will be analyzed by RustMap further to identify
+dependencies and translation units.
+
+3.3 Function Dependencies and Translation Order
+
+Project-scale C programs can contain numerous functions to be translated, neces-
+sitating a strategic prioritization of their translations. Intuitively, the functions
+that are called by other functions should be translated before their callers; and
+data types used by a function should be translated before the function. If there
+are circular dependencies (e.g., recursive functions and data types), they can be
+put into one translation unit to be translated together, as long as their combined
+size is within the length limit of LLM. In addition, to help check functionality
+based on a given test case, functions that are executed should be prioritized
+before others that are not.
+
+To achieve this goal, we utilize both dynamic and static call graphs of the
+C program preprocessed (see Section 3.2) by our approach to determine the
+translation order of functions and their dependencies. A dynamic call graph
+represents the function cal relations in a program, by recording the actual calling
+sequence when running the program in debug mode with one or more test cases.
+A static call graph represents conservatively all possible call relations.12 While
+dynamic call graphs are more precise than static ones so that we can prioritize
+the translation of the executed functions with respect to given test cases as
+the Rust program can still compile and run even if other non-executed code is
+removed, static ones capture more call relations so that our translation for the
+program can be more complete in case more test cases will be used.13
+
+We also note that there can be functions that call each other directly or
+indirectly, similarly for recursive data type definitions. For such cases, trans-
+lating either function alone without referring to others may lead to translation
+errors because LLM would lack the knowledge about the dependent code. This
+motivates us to put inter-dependent functions and/or data types together for
+translation. To do so, we use the Tarjan algorithm [54] to identify Strongly Con-
+nected Components (SCCs) in a call graph and their dependencies, and treat all
+the code belonging to one SCC as a translation unit.14
+
+Thus, to determine the translation units and their translation order, we start
+from the main entry of a call graph of the project, we perform a depth-first search,
+recursively visiting all nodes and translating all the children of a node before
+translating the node itself, ensuring that each function is translated after all its
+
+12 We used gprof [22] to get dynamic call graphs, and cflow [47] to get function call
+
+graphs and data type dependencies.
+
+13 Due to this translation strategy, RustMap cannot ensure the functional correctness
+
+of non-executed functions yet.
+
+14 If the number of lines of code of an SCC is beyond the length limit of LLM, we still
+
+break down it into smaller units for translation.
+
+RustMap: Project-Scale C-to-Rust Migration
+
+11
+
+callees and dependencies have been translated. Figure 5 with colored numbers
+illustrates the visit order and the resulting translation units and order. E.g.,
+Nodes C and D have the same colored “Translate order” 2, which indicates they
+are in the 2nd unit to be translated together.
+
+Fig. 5: Illustration of translation order using a call graph. Each node represents a func-
+tion. The blue numbers indicate the visit order, and the red numbers indicate the order
+of translation.
+
+During this process, we have observed and utilized an important capability
+and flexibility of LLM in dealing with unknown function or data type: we can
+instruct LLM to ignore an unknown dependency when the C code for translation
+contains references to functions or data types not defined in the code itself, or
+to replace the unknown with a generic no-op placeholder, or to ask human users
+to provide additional definitions of those dependencies. This is also a reason
+why we can just translate the functions that appear in dynamic call graphs to
+produce compilable and executable Rust program without the need to translate
+all functions in static call graphs.15
+
+4 Translating C functions to Rust using LLM
+
+Translating C programs to Rust programs needs to ensure that the Rust pro-
+grams (1) can be compiled successfully, and (2) should behave consistently with
+the C programs. We leverage ChatGPT 4o [30,44] with human prompts and test
+cases for these purposes. Each program is broken down into translation units as
+described in the previous section; each unit is fed to LLM for translation, and
+their translation results are merged together to form the Rust program.
+
+Figure 6 shows an overview of our uses of LLM. Specifically, given a C pro-
+gram and its translation units, we first prompt ChatGPT to translate the pro-
+gram (if the whole program can fit within the LLM input length limit) or one of
+
+15 This capability and flexibility of LLM is also applicable to any reasonable code chunk,
+not limited to a complete function. Thus, when the number of lines of code of just
+one function is beyond the length limit of LLM, we can break down the function
+into shorter code chunks at various syntactically valid places, e.g., the call sites to
+other functions, the boundaries of a while statement, a case in a switch statement,
+etc., and treat each smaller code chunk as a translation unit and merge them back
+to a function after they are translated into Rust.
+
+SMU Classification: RestrictedGFEDCAB1234567122345612Visit orderTranslate order12
+
+Cai et al.
+
+Fig. 6: Workflow of translating a C program via LLM
+
+its translation units (Section 4.1). If the Rust compiler fails to compile the Rust
+code translated by ChatGPT, we will include the compiler error messages in the
+prompt to ChatGPT for the next round of trial (Section 4.3). If the program and
+all its translation units can be translated and compiled, we continue to execute
+the translated program in the debug mode and check their execution states. If
+there is a functional inconsistency between the Rust program and the C program
+when they execute, we perform bug localization to locate possible buggy code in
+the translated Rust code and its corresponding C code, and then prompt Chat-
+GPT to re-translate the code to fix the bug (Section 4.4). The prompt templates
+we use are provided in our repo.16
+
+4.1 Leveraging ChatGPT for Translation
+
+Rust and C are two distinct languages with different syntax and semantics.
+This requires extensive pre-existing knowledge of both Rust and C, which is
+demanding and the main reason for translation errors by other tools. To address
+such issues, we utilize ChatGPT for translation, as ChatGPT is pre-trained
+with a large amount of programming-related knowledge, including C and Rust
+programs, which equips it with a strong ability to understand both languages.
+Figure 7 shows a prompt template16 we used to translate a piece of C code
+to Rust. The prompt considers various Rust programming conventions useful
+for idiomatic Rust code, e.g., distinguishing between mutable and immutable
+references, adding lifetime annotations, and using the Rust standard library
+as much as possible. By following these conventions, the generated Rust code is
+more likely to be idiomatic and readable, and adhere to Rust’s safety guarantees.
+
+4.2 Adding Dependencies into Translated Files
+
+As our approach can divide a C file into multiple Rust files (cf. Section 3.1)
+during translation, we need to spell out the dependencies between the files so
+
+16 https://github.com/Cxm211/RustMap/tree/main/prompt-templates
+
+SMU Classification: RestrictedC programChatGPTRust programCompileError messageExecuteExecuteInterceptstateFunctionalitycompareInterceptstateBug localizationPossiblebuggy codeDirectly apply LLMFix compilation errorFix functionality ErrorInformation feed to LLMRustMap: Project-Scale C-to-Rust Migration
+
+13
+
+Please take on the role of an expert developer familiar with the Rust and C and
+C++ programming languages.
+
+Convert the given code to idiomatic Rust, keeping its functionality. Use minimal
+unsafe traits and follow the requirements below. Don’t translate unknown vari-
+ables or functions, and avoid assumptions. If the C code references other vital
+functions or structures, ask me first and wait for my provided input. (ASK ME
+first)
+
+1. If a variable inside the function is modified, add the mut specifier.
+2. Distinguish between mutable and immutable references by storing intermedi-
+
+ate values.
+
+3. If necessary, add lifetime annotations.
+4. Add clear comments for all numeric types and pay attention to type conver-
+
+sions, especially between usize and others.
+
+5. Be cautious of potential out-of-bound errors in the C code.
+6. Use the Rust standard library as much as possible.
+7. When performing arithmetic operations, be mindful of potential overflow or
+
+underflow.
+
+(...Here is C Code to be translated...)
+
+Fig. 7: Prompt for applying ChatGPT to translate C code to Rust
+
+that the entire translated Rust project can be compiled successfully. We iden-
+tify the dependencies based on the original C code and add reference relations
+into the files. Specifically, given a Rust file containing a translated function, we
+first identify all its callee functions using call graphs. Then, we locate the corre-
+sponding Rust files for the callees and identify their module name. Finally, we
+add Rust use statements to import those modules at the beginning of the initial
+Rust file. For example, BZ2_decompress function calls BZ2_hbCreateDecodeTables function,
+which is defined in huffman.c. We use the file path from the scaffolding step as
+the module name (i.e., huffman::BZ2_hbCreateDecodeTables), and import the module
+using use statement at the beginning of the file containing the BZ2_decompress func-
+tion. When some dependent functions are put into the same translation unit and
+their translation results are merged into one Rust file, the relevant use statements
+would be removed. This restructuring maintains the original dependencies be-
+tween functions, enhancing the maintainability and readability of the translated
+Rust codebase.
+
+4.3 Fixing compilation errors
+
+We adapt a prior study [12] that uses LLMs to produce fixes for compilation
+errors in Rust programs, which achieves approximately 74% peak accuracy by
+combining prompting techniques and iterative feedbacks. When a function and
+its necessary dependencies are translated, we use the rustc compiler to check
+whether they can be compiled successfully. If compilation fails, we will locate the
+
+14
+
+Cai et al.
+
+Rust function or code construct that causes the failure, and take the compilation
+error messages, along with the buggy Rust code and its corresponding original
+C code, as the input prompt for ChatGPT to fix the errors in the Rust code.
+We will conduct this process three times until the generated Rust code can be
+compiled without an error.
+
+4.4 Locating and Fixing functionality errors
+
+When the main entry function and its necessary dependencies are translated and
+the whole Rust program is compiled, we run the compiled Rust program with
+the test inputs available from the original C project. To ensure they produce
+the same outputs for the same test inputs, we instrument the Rust program and
+intercept its runtime execution states, and then compare the states with those
+from the C program.17 If there is any inconsistency, we follow the steps below
+to locate and fix the possible faulty code fragments or functions.
+
+To effectively locate bug locations causing runtime state inconsistencies in
+programs, we adopt a binary-search-based method on the C and Rust programs
+at the same time. First, we consider all the statements in the buggy Rust pro-
+gram as bug candidate statements. Then, a breakpoint in the Rust program is set
+around the halfway point of the sequential execution of all bug candidate state-
+ments; the breakpoint in the C program is set at the corresponding C statement
+semantically equivalent to the Rust breakpoint statement. Then, we check the
+state of the Rust program and the state of the C program at the breakpoints.
+If they are consistent, the bug candidate statements should be narrowed to its
+second half; otherwise, we narrow the bug candidate statements into its first
+half only (although the second half may still contain more bugs). This process
+will be executed repeatedly until the number of bug candidate statements is
+small (fewer than 10 within a function) and the statements are relatively simple
+without complex control-flow changes (e.g., simple code blocks with less than 5
+Cyclomatic Complexity [11, 57]). As a result, we locate a code fragment in Rust
+with bug candidate statements (also called faulty code fragment), as well as a
+corresponding code fragment in the original C program that is supposed to be
+functionally equivalent to the Rust code fragment.
+
+To fix a possible faulty code fragment, we instantiate the prompt template
+shown in Figure 8 18 and ask ChatGPT to fix. We take (1) the corresponding
+code fragment from the C program with the states before and after executing the
+
+17 In our implementation, we inserted various print statements at needed locations in
+both C and Rust programs to print out relevant inputs and outputs and compared the
+printed values. Relevant inputs of a function are the function parameters; Relevant
+outputs of a function are the variables or expressions returned by the function.
+Relevant inputs of any code fragment are selected by LLM with a simple use-def
+static analysis of the data used in the code fragment; Relevant outputs of any code
+fragment are selected by LLM with a simple use-def static analysis of the data that
+is modified in the code fragment.
+
+18 https://github.com/Cxm211/RustMap/blob/main/prompt-templates/prompt_to
+
+_solve_inconsistency_error.txt
+
+RustMap: Project-Scale C-to-Rust Migration
+
+15
+
+// C code fragment with its before - and after - states :
+{
+
+( before - state of C )
+(... Here is the C code to be translated to Rust ...)
+( after - state of C )
+
+}
+
+// Rust code generation :
+{
+
+( before - state in Rust )
+(... Here is the possibily faulty Rust code ...)
+/** please fix the Rust code fragment here to have
+
+consistent states as the C code above
+
+*/
+
+}
+
+Fig. 8: Prompt template for ChatGPT to resolve functionality errors. The instantiated
+prompt will include the same requirements as shown in the prompt in Figure 7.
+
+C code, and (2) the faulty Rust code fragment with the state before executing
+the faulty code, as the input prompt for ChatGPT to correct the Rust code so
+that it produces the same output state as the C code. This fix process for each
+located buggy code fragment will be iterated three times. If ChatGPT fails to
+fix the Rust code to produce states consistent with the C code, we leave it as a
+translation failure case. The whole locate-and-fix process will also be repeated
+many times until time out or the whole Rust program can run the given test
+cases to produce outputs consistent with the C program.
+
+5 Empirical Evaluation
+
+To evaluate the effectiveness of RustMap in translating C code to Rust, we per-
+form studies on real-world C programs, including a set of RosettaCode programs
+and a file compression program bzip2, ranging from tens of lines to tens of thou-
+sands of lines of code. Section 5.1 shows the overall performance of RustMap in
+various functionality, safety, readability metrics. Section 5.2 provides transla-
+tion examples (e.g., thread-safe global variables, interdependent data structures,
+pointer aliasing, control-flow switch-case, goto, etc.) that are challenging for other
+tools. These examples are also provided in our repo19 for potential reuses by
+future research. Section 5.3 discusses our limitations.
+
+5.1 Effectiveness
+
+Functionality Evaluation. After applying RustMap, we successfully con-
+verted 125 RosettaCode programs and a file compression program bzip2 from C
+to Rust. Unlike prior studies that only output Rust code snippets, we generated
+compilable Rust codebases that can execute and produce the same outputs as
+the original C programs for their given test cases. For example, the converted
+bzip2 program can successfully compress and decompress given test files, while
+none of the existing tools can achieve this level of functionality.20
+
+19 https://github.com/Cxm211/RustMap/tree/main/case_study
+20 The translated Rust code for bzip2 is at: https://github.com/Cxm211/RustMap/tr
+
+ee/main/rust-code/bzip2_rs_gpt.
+
+16
+
+Cai et al.
+
+On the other hand, there can be some C code that is not translated by our
+approach, as the C code can contain some functions, macros, or branches that
+are not executed by the given test cases. To gauge the likely deficit, Table 1
+shows the proportion of C functions and lines that are translated into Rust with
+respect to the C functions and lines that are executed/covered by the test cases.
+
+C File
+
+Function Coverage Line Coverage
+
+blocksort.c
+bzip2.c
+bzlib.c
+compress.c
+decompress.c
+huffman.c
+Average
+
+bzip2
+
+66.7%
+100.0%
+100.0%
+100.0%
+100.0%
+100.0%
+94.4%
+
+Rosetta Code
+
+71.7%
+100.0%
+93.3%
+100.0%
+93.2%
+98.8%
+92.8%
+
+125 .c files
+
+95.3%
+
+93.2%
+
+Table 1: Proportion of C functions and lines that are translated into Rust with respect
+to the C functions and lines that are executed in the given test cases.
+
+We observe that the differences between the amount of C code that is trans-
+lated and the amount of C code that is executed are small, indicating that the
+translated Rust projects have close functionality as the original C projects.
+
+RustMap can produce runnable Rust projects that pass the same test cases
+as the original C projects.
+
+Unsafety Evaluation. We compare the number of unsafe code blocks in the
+Rust projects translated by RustMap with those translated by other tools.
+Laertes [18] implemented a tool to categorize unsafe code, and we used it for
+measuring unsafe code in Rust projects. Table 2 shows the numbers of unsafe
+code blocks in the Rust projects translated by RustMap, C2Rust, CRustS, and
+Laertes. We measure the unsafe code declared in Rust’s official document [34]:
+Read From Union (reading from a field of a C-style untagged union), MutGlobal
+Access (reading, writing, or referencing to mutable global(static)/external vars),
+RawPtr Deref (dereferencing a raw pointer), Alloc (direct external function calls
+to malloc and free), Extern Call (calling an external function other than ‘Alloc’).
+
+The translated Rust code for RosettaCode programs is at: https://github.com/Cxm
+211/RustMap/tree/main/rust-code/rosetta_code_gpt/125-rosetta-code-gpt
+
+RustMap: Project-Scale C-to-Rust Migration
+
+17
+
+RustMap is much more effective in reducing unsafe code when translating C
+to functionally equivalent Rust.
+
+Tool
+
+Read
+From
+Union
+
+Mut
+Global
+Ac-
+cess
+
+Raw
+Ptr
+Deref
+
+Alloc
+
+Extern
+Call
+
+Unsafe
+Cast
+
+C2Rust
+CRustS
+Laertes
+RustMap*
+
+C2Rust
+CRustS
+Laertes
+RustMap*
+
+0
+0
+0
+0
+
+0
+0
+0
+0
+
+bzip2
+
+3424
+3424
+3359
+122
+
+386
+386
+386
+126
+
+Rosetta Code
+
+339
+339
+339
+3
+
+572
+572
+572
+0
+
+14
+14
+14
+5
+
+68
+68
+68
+0
+
+1
+1
+1
+0
+
+593
+593
+593
+0
+
+0
+0
+0
+0
+
+19
+19
+19
+0
+
+Table 2: Numbers of unsafe code blocks
+
+Readability Assessment. To measure RustMap’s capability in terms of code
+readability, we compare the Cognitive Complexity (CC) scores of the Rust projects
+generated by different tools. Cognitive Complexity quantifies code readability
+and maintainability, assessing the cognitive load on developers. To do so, we ap-
+ply the complexity crate [11] to the functions in the generated Rust projects. Fig-
+ure 9 shows the comparison between RustMap and C2Rust in terms of CC scores.
+We observe that the complexity of the Rust projects translated by RustMap is
+significant lower than the ones generated by C2Rust (p-value < 0.05).
+
+Rust code translated by RustMap is easier to read than the code translated
+by C2Rust.
+
+5.2 Advantages Against Other Tools: Case Studies
+
+This subsection showcases various challenging examples during our translation of
+C programs to Rust. These sample cases demonstrate how RustMap works better
+than other state-of-the-art C-to-Rust translation tools, including C2Rust [40],
+CRustS [37] and Laertes [17, 18], and the translation patterns identified during
+the process can be generally applicable to all future C-to-Rust translation studies
+aiming for producing more readable and safer code.
+
+18
+
+Cai et al.
+
+(a) BZip2
+
+(b) RosettaCode
+
+Fig. 9: Cognitive Complexity of Rust code translated by RustMap and C2Rust. Note
+that the y-axes are in log scale.
+
+Rewriting Global Variables. Global variables are widely used in C programs,
+but if directly translated into Rust, they are not thread-safe and can cause static
+initialization order fiasco [6, 32] if imported multiple times into different files.
+Thus, simple syntax-rule-based translation done by other tools are insufficient
+in ensuring the safety of the translated code.
+
+For global variables that are of primitive types in C, we observe that we can
+still use simple rule-based automation translation like other tools without the
+cost of invoking LLMs and associated uncertainty and error fixing, but need to
+enforce the global variables are initialized only once in a thread-safe manner when
+they are first accessed by using the lazy_static macro and Mutex in Rust. Specifi-
+cally, we rewrite C primitive-type global variables using lazy_static and providing
+getter and setter functions to replace direct accesses to them, as recommended
+for Rust programmers [35]. Figure 10 illustrates sample global variables declared
+in C (Figure 10a) and their translations by C2Rust (Figure 10b) and by RustMap
+(Figure 10c). For example, we rewrite int numFileNames via a Mutex inside the body
+of the lazy_static macro. In the Rust code in Figure 10c, lazy_static is used to
+create lazily instantiated global variables. This is necessary because Rust does
+not support mutable global variables directly. By using lazy_static and Mutex, we
+ensure that these global variables are safely initialized only once, and access to
+them is thread-safe, preventing data races. This approach replaces the tradi-
+tional global variables in C, offering better safety and concurrency guarantees.
+and define the get_numFileNames and set_numFileNames functions. As a comparison, the
+code translated by C2Rust would lead to reading or modifying a mutable static
+variable, that is an unsafe practice in Rust [32].
+
+For non-primitive global variables, because it is more challenging to use rule-
+based automation to rewrite accesses into various data fields of non-primitive
+global variables, we leave it to LLMs to translate them following the same trans-
+lation process for other code constructs (see Section 4.1) and rely on the same
+
+RustMapC2Rust101100101102103Complexity scoresRustMapC2Rust101100101102103Complexity scoresRustMap: Project-Scale C-to-Rust Migration
+
+19
+
+// bzip2 . i
+int numFileNames , numFileProcessed , blockSized100k ;
+
+(a) Sample Global Variable Definitions in C
+
+// bzip2 . rs from C2Rust
+# [ no_mangle ]
+pub static mut numFileNames : Int32 = 0;
+# [ no_mangle ]
+pub static mut num Fi les Pro ces sed : Int32 = 0;
+# [ no_mangle ]
+pub static mut blockSize100k : Int32 = 0;
+
+(b) Sample Global Variable Definitions translated by C2Rust
+
+// idiomatic lazily instantiated global variable
+// bzip2 / global_bzip2 . rs
+lazy_static ! {
+
+pub static ref numFileNames : Mutex < i32 > = Mutex :: new ( 0 );
+pub static ref num Fi les Pro ces sed : Mutex < i32 > = Mutex :: new ( 0 );
+pub static ref blockSize100k : Mutex < i32 > = Mutex :: new ( 0 );
+
+}
+
+pub fn get_numFileNames () -> i32 { /.../
+pub fn set_numFileNames ( new_value : i32 ) {
+
+}
+
+/.../ }
+
+pub fn g e t _ n u m F i l e s P r o c e s s e d () -> i32 { /.../
+pub fn s e t _ n u m F i l e s P r o c e s s e d ( new_value : i32 ) {
+
+}
+
+/.../ }
+
+pub fn get _bl ock Si ze1 00k () -> i32 { /.../
+pub fn set _bl ock Si ze1 00k ( new_value : i32 ) {
+
+}
+
+/.../ }
+
+(c) Sample Global Variables translated via lazy_static! by RustMap
+Fig. 10: Sample Translations of Global Variables
+
+error checking and fixing processes (see Sections 4.3 and 4.4) to ensure their
+functionality.21
+
+Pointer Aliasing. In C, pointer aliasing [15], especially involving arrays, is
+often used to optimize memory usage and access patterns. The flexibility to
+cast pointers from one type to another enables flexible manipulation of data
+structures with varied granularity. However, it may lead to potential issues with
+type safety and endianness sensitivity.
+
+For example, in Figure 11a excerpted from bzip2, the EState structure con-
+tains three array pointers of different data types, and a 32-bit signed integer that
+indicates the number of blocks. The line 10 s->block = (UChar*)s->arr2; casts UInt32*
+to UChar*; the resulting pointer block is thus an alias of arr2 of a different type
+and can access individual bytes of the integers pointed to by arr2. Whether the
+memory operations done through block is correct is dependent on the system’s
+byte order/endianness.
+
+21 The functionality is thus only ensured with respect to the given test runs.
+
+20
+
+Cai et al.
+
+Rewrite Pointer Aliasing in C2Rust. Figure 11b shows the Rust code
+translated by C2Rust: C2Rust keeps arr2, block, and zbits as raw pointers, and
+uses unsafe code blocks, that can increase the risk of unsafe memory operations
+and errors.
+
+Another issue with the C2Rust translation is that it produces multiple defi-
+nitions of struct EState across different translated files compress.rs, blocksort.rs, and
+bzlib.rs, even though the struct definition only appears once in one header file
+bzlib_private.h in the original C program. C2Rust and all C2Rust-based tools
+[17, 18, 37, 67] have this issue because it preprocesses each .c file into .i first
+before translation and if multiple .c files contain the same .h file, the header con-
+tents would appear multiple times across the files and C2Rust would produce
+erroneously duplicate code.
+
+// bzlib_private . h
+typedef struct {
+
+nblock ;
+
+UChar * zbits ;
+UInt32 * arr2 ;
+UChar * block ;
+Int32
+} EState ;
+// pointer aliasing without endianness concern ( in bzlib . c )
+// initialize EState * s
+s - > block = ( UChar *) s - > arr2 ;
+// pointer aliasing with endianness concern ( in compress . c )
+s - > zbits = ( UChar *) (&(( UChar *) s - > arr2 )[ s - > nblock ]);
+
+// passing one of both fields into calling function in fallbackSort
+fallbackSort ( /* ... */ s - > arr2 , /* ... */ );
+otherFunction (s - > zbits );
+
+(a) Sample struct with Pointer Aliasing in C.
+
+// Duplicated Defined in compress . rs , blocksort . rs , bzlib . rs
+pub struct EState {
+
+pub arr2 : * mut UInt32 ,
+pub block : * mut UChar ,
+pub zbits : * mut UChar ,
+pub nblock : Int32
+/* ... */
+
+}
+// bzlib . rs ( without endianness concern )
+unsafe { (* s ). block = (* s ). arr2 as * mut UChar ; }
+// compress . rs ( with endianness concern )
+unsafe {
+
+(* s ). zbits =
+
+& mut *((* s ). arr2 as * mut UChar ). offset ((* s ). nblock as isize ) as
+
+}
+
+* mut UChar ;
+
+// blocksort . rs
+fallbackSort ( /* ... */ , (* s ). arr2 , /* ... */ );
+
+(b) Pointer Aliasing translated by C2Rust.
+Fig. 11: Sample Translations of Aliased Pointers for C and C2Rust
+
+RustMap: Project-Scale C-to-Rust Migration
+
+21
+
+// Define only once in headers / bzlib_private . rs
+// use bzlib / globals_bzlib . rs
+pub struct EState {
+
+pub block : Vec < u8 > , // use block to represent zbits
+// pub arr2 : Vec < u32 >
+// pub zbits : Vec < u8 > ,
+pub nblock : i32 ,
+
+}
+
+(a) Rewrite struct EState by RustMap. The struct translated by RustMap is stored in a header
+file generated by the project scaffolding step (Section 3) and shared with all other files needing this
+struct.
+
+pub fn r e b u i l d _ a r r 2 _ f r o m _ b l o c k ( block : &[ u8 ]) -> Vec < u32 > {
+
+/* reconstructs a u32 array from a block of bytes */
+
+}
+
+pub fn b u i l d _ b l o c k _ f r o m _ a r r 2 ( arr2 : &[ u32 ]) -> Vec < u8 > {
+/* converts a u32 array into a block of bytes */
+
+}
+// blocksort / s c c _ 7 1 _ f a l l b a c k so r t . rs
+let mut arr2 = b u i l d _ b l o c k _ f r o m _ a r r 2 ( s . block );
+fallback_sort ( /* ... */ , & mut arr2 , /* ... */ );
+// Subsequent assignment of modified temporary arr2 to s . block
+s . block = r e b u i l d _ a r r 2 _ f r o m _ b l o c k (& arr2 );
+
+(b) Aliased Pointer Operations WITHOUT Endianness Concern.
+
+pub fn g e t _ z b i t s _ f r om _ a r r 2 ( estate : & mut EState ) {
+
+/* construct a temporary arr2 : Vec < u32 > from estate . block : Vec < u8 > */
+/* updates the zbits field based on the arr2 , and
+
+Uses if - else checks based on system endianness . E . g . , */
+
+let mut bytes = if cfg !( target_endian = " little " ) {
+
+arr2 [ offset ]. to_le_bytes () // Convert to little - endian byte array
+
+} else {
+
+arr2 [ offset ]. to_be_bytes () // Convert to big - endian byte array
+
+};
+
+}
+
+pub fn u p d a t e _ a r r 2 _ f r o m _ z b i t s ( s : & mut EState , zbits : &[ u8 ]){
+/* updates the arr2 field based on the zbits values .
+
+Uses if - else checks based on system endianness . E . g . , */
+
+arr2 [ offset ] = if cfg !( target_endian = " little " ) {
+
+u32 :: from_le_bytes ( bytes ) // Convert bytes back to little - endian u32
+
+} else {
+
+u32 :: from_be_bytes ( bytes ) // Convert bytes back to big - endian u32
+
+};
+/* converts arr2 array into s . block */
+
+}
+
+// In B Z2_ com pre ssB loc k
+let mut s = // initialize new EState
+let mut zbits : Vec < u8 > = g e t _ z b i t s _ fr o m _ a r r 2 (& mut s ); // obtain zbits
+otherFunction (& zbits , ...);
+u p d a t e _ a r r 2 _ f r o m _ z b i t s (& mut s , & zbits ); // update block
+
+(c) Aliased Pointer Operations WITH Endianness Concern.
+Fig. 12: Pointer Aliasing Rewrites by RustMap
+
+Rewrite Pointer Aliasing in RustMap. RustMap replaces C pointer
+aliasing in a safer and idiomatic way that uses vectors and conversion functions.
+
+22
+
+Cai et al.
+
+First, when prompting LLM with the struct definition in C, we also ask LLM to
+infer the suitable vector type for each pointer when converting it to Rust. For
+example, Figure 12a shows that the pointers are converted to use safe collections
+like Vec<u8> and Vec<u32>. However, note that both arr2 and zbits are commented
+out, because they point to the same memory as block in the original C, and we can
+use just one vector to represent all three. We also used LLM to identify potential
+aliasing among all pointers in the given code during prompting. Then, to mimic
+the memory operations done via aliased pointers in the original C program, we
+also prompt LLM to construct specific functions for each aliasing pointer to read
+from and write to the aliased memory. Figure 12b and Figure 12c show-case such
+functions for the arr2 and zbits pointers, respectively. The internal workings of
+the functions vary, depending on whether they are concerned of endianness.
+
+Case 1: Pointer Aliasing without Endianness Concern. In Figure 12b, the two
+conversion functions are constructed by ChatGPT with human feedback. They
+essentially make copies of the array referenced by block before/after each read-
+/write operation for safer access. Lines 8–12 illustrates their usage for migrating
+C code involving operations on aliasing pointer: a temporary variable arr2 is used
+to hold a new copy of the original array referenced by s.block; then all read/write
+operations via the original arr2 in C are done via the temporary variable; finally,
+a new copy of the array referenced by the temporary variable is passed back to
+the original reference s.block. Tihs way of translation produces safer access to
+shared arrays, while it may still not be safe for multi-thread programs and slow
+down the efficiency of the code. We leave its improvements for future work.
+
+Case 2: Pointer Aliasing with Endianness Concerns. Endianness concerns arise
+in C due to direct memory manipulation that may be sensitive to byte order,
+as shown in Figure 11a line 12. In this line, arr2 is first cast to UChar*. Then,
+the address of the nblock-th element of this array is taken and cast to UChar* and
+assigned to zbits. These seemingly convoluted operations may indicate the code’s
+intention to be endianness-aware, and thus the translated Rust code should also
+ensure correct handling of endianness.
+
+Figure 12c illustrates the two conversion functions and their usages for such
+cases. The essential idea of the conversion functions is the same as the case
+without concerning endianness by using a temporary variable to hold copies of
+the array; the main differences are the if-else checks of system endianness to
+manage byte order correctly when making copies of the array.
+
+Compared to the direct raw pointer operation translated by C2Rust (Figure
+11b), RustMap handles pointer aliasing and endianness in a much safer way.
+Whether to be concerned of endianness when translating operations on an aliased
+pointer, we also prompted ChatGPT to make the choice.
+
+When using RustMap to translate pointer aliasing operations, we found that
+ChatGPT helps to provide safe rewrites for either without or with concerns
+of endianness [13] (illustrated in Figure 12b and Figure 12c respectively).
+
+RustMap: Project-Scale C-to-Rust Migration
+
+23
+
+Control-Flow Translation: switch-cases. In C, switch statements can fall
+through [36], i.e., the execution of a case that does not contain a break statement
+will continue directly into the next case. In contrast, Rust’s match statement does
+not have fall-through; each arm must explicitly end with a value or an action,
+ensuring that only one arm is executed. Figure 13a shows the original C code with
+a switch-case structure. Figure 13b displays the Rust code rewritten by C2Rust.
+In contrast, Figure 13c shows the Rust code translated by RustMap, as suggested
+by ChatGPT. By leveraging match statements in a loop that encapsulates state
+transitions explicitly, it reduces unsafe code usage, and improves readability and
+maintainability.
+
+// decompress . i
+switch (s - > state ) {
+
+/* ... */
+case 11:
+/* code without break */
+case 12:
+/* code without break */
+/* ... */
+
+}
+
+match (* s ). state {
+
+/* .. ... */
+11 = > current_block
+
+= 12259750428863723923 ,
+
+12 = > current_block
+
+= 1 5 1 4 6 9 4 6 9 7 2 5 2 5 3 6 8 6 0 9
+
+/* ... */
+
+}
+match current_block {
+
+1 2 2 5 9 7 5 0 4 2 8 8 6 3 7 2 3 9 2 3 = > {
+
+/* ... */
+
+}
+1 5 1 4 6 9 4 6 9 7 2 5 2 5 3 6 8 6 0 9 = > {
+
+/* ... */
+
+}
+
+/* ... */
+
+}
+
+// decompress / scc_59_BZ2_
+decompress . rs
+’ state_loop : while s . state <= 50 {
+
+match s . state {
+
+/* ... */
+11 = > {
+
+/* ... */
+s . state = 12
+
+} ,
+12 = > {
+
+/* ... */
+s . state = 12
+
+}
+/* ... */
+
+}
+
+}
+
+(a) Sample C switch-cases with
+fallthrough
+
+(b) Rewrite by C2Rust
+Fig. 13: Sample Translations of switch-cases with fallthrough.
+
+(c) Rewrite by RustMap.
+
+Control-Flow Translation: goto. goto statements, commonly used in C for
+jumping to specific code locations, are not support in Rust. Figure 14a is an
+example of using goto in C code. The GET_BITS macro calls another macro, RETURN,
+that utilizes goto. GET_BITS itself is used within a switch-case with fallthrough. When
+prompted with all the code at once, ChatGPT could not generate correct trans-
+lated Rust, although it provided valid suggestions to consider wrapping the code
+at the goto target into a function and splitting the code in the macro into two
+parts at the conditional statement checking for the goto. We then refined the
+prompts for ChatGPT according to its own suggestions, to (1) wrap the code at
+and after the save_state_and_return target label as a function and replace the goto
+with a function call, and (2) split the code at the if statement and replace the
+use of the GET_BITS macro with calls to the two split functions. ChatGPT was then
+successful in performing the tasks, producing one function save_state_and_return for
+the goto and two split functions GET_BITS_first_half and GET_BITS_second_half, based
+on its understanding of the functionality of the code.
+– In the C code, the GET_BITS macro intends to extract a specified number of bits
+
+(nnn) from the input stream and stores them in the variable vvv.
+
+24
+
+Cai et al.
+
+– When there are not enough available bits in the input stream, the RETURN macro
+is invoked to save the current state and use goto to jump to the save_state_and_return
+label.
+
+The first split function attempts to perform the same functionality of the code
+before the if statement and returns a Result to indicate if it is successful (OK)
+or not (Err). The second split function wraps all the remaining code after the
+if statement, ensuring correct functionality. Figure 14b shows the Rust code
+by RustMap. This splitting and replacement worked well, although specific for
+this case; it makes the translated code more readable and maintainable through
+explicit error handling and state management.
+
+In contrast, C2Rust uses a more generic approach to compile away goto and
+switch-cases by implementing the Relooper control-flow analysis and restructuring
+[3, 46, 49], but it does not consider project-specific code functionality, and its
+translated code grows much in size and becomes harder to read. Future work
+may consider using Rust goto macros [33] with the prompts of RustMap to make
+the translated code more readable while retaining code functionality.
+
+// definition of two macros
+# define GET_BITS ( lll , vvv , nnn )
+
+...
+if (s - > strm - > avail_in == 0) RETURN ( BZ_OK );
+...
+
+# define RETURN ( rrr )
+
+{ retVal = rrr ; goto s a v e _ s t a t e _ a n d _ r e t u r n ; };
+
+// usage of two macros
+switch (s - > state ) {
+
+// case 13:
+GET_BITS ( BZ_X_MAGIC_4 , s - > blockSize100k , 8)
+
+\
+\
+\
+
+\
+
+fn s a v e _ s t a t e _ a n d _ r e t u r n ( s : & mut DState , /* ... */ ) {
+
+/* Code at and after goto target */
+
+(a) Sample goto in C
+
+}
+...
+match s . state {
+
+13 = > {
+
+// #[ cfg ( debug_asserti ons )]
+
+s . state = 13;
+loop {
+
+let mut tm p_b loc kSi ze1 00 k =
+match G E T _ B I T S _f i r s t _ h a l f (s , & mut tmp_blockSize100k , 8){
+
+s . blockSize100k as u32 ;
+
+Ok ( _ ) = > {
+Err ( _ ) = > { s . blockSize100k = tmp _b loc kSi ze1 00k as i32 ; } ,
+
+s . blockSize100k = tmp _bl ock Siz e1 00k as i32 ; break ;
+
+}
+
+}
+if unsafe { (* s . strmD ). avail_in } == 0 {
+
+retVal = CONSTS . BZ_OK ;
+break ; // break out the inner loop
+
+s a v e _ s t a t e _ a n d _ r e t u r n (s , /* ... */ );
+
+}
+G E T _ B I T S _ s e c o n d _ h a l f ( s );
+
+...
+
+(b) Sample Rust without goto translated by RustMap.
+Fig. 14: Sample goto inside macro definitions.
+
+RustMap: Project-Scale C-to-Rust Migration
+
+25
+
+5.3 Discussion & Threats to Validity
+
+There are still different kinds of code features in C imposing challenges when
+being translated to Rust. For example, C projects often involve sharing arrays by
+pointers, while safe Rust disallows two writable pointers referencing the same
+memory to avoid memory errors. RustMap translates array pointers to Rust
+vectors (Vec<>) and enable vector sharing by making value copies of the vectors
+before and after each write operation, which may impact code efficiency, instead
+of using slices to improve efficiency. Managing lifetimes of slices [21] in Rust can
+be error-prone and challenging, which might impact performance and correct-
+ness. Pointer punning [60] and aliasing are very common in C projects within the
+same struct, where two array pointers point to the same memory, while safe Rust
+disallows two writable pointers referencing the same memory to avoid memory
+errors. RustMap translates these pointers into Vec<> and uses value copying to
+handle read/write operations of the data, which is much less efficient than origi-
+nal C. Using slices within the same struct introduces lifetime issues [21], making
+this approach worth finding solutions to resolve. This is because slices are faster
+than vectors in Rust. Slices are references to existing data and do not involve the
+overhead of memory allocation and deallocation, resulting in more efficient op-
+erations. Future work could explore the deeper semantic of such pointer sharing
+operations (e.g., there may be at most one writer to the shared memory at any
+time) to enable more efficient translation to more idiomatic Rust code, although
+this may involve trade-offs in machine performance.
+
+Concurrent programming in C also often involves shared memory, which has
+very different coding patterns and algorithms from Rust. Our study has not yet
+evaluated with C code having concurrency and threads, and future work is to
+leverage Rust’s safe concurrency features during translation to ensure idiomatic
+coding and correct multi-threading capabilities of translated code.
+
+C code can manipulate memory at byte level and becomes sensitive to the
+endianness/byte order in the execution systems. RustMap can infer the expected
+endianness of the code based on LLM prompts and add suitable checks (e.g.,
+cfg!(target_endian = "little")) in the translated Rust code as needed.
+
+A trivial but important aspect of C-to-Rust translation involves variable
+naming conventions. E.g., in C, camel case is commonly used, whereas Rust
+developers may prefer underscores or snake cases. Thus, during the conversion,
+variable names should be transformed from camel case to snake case to adhere
+to Rust’s naming conventions. ChatGPT used in RustMap has the capability to
+rename variable names as prompted.
+
+RustMap focuses on translating functions executed by given test cases. We
+only used a few test cases for each of the programs in our evaluation, and the
+code coverages of the original C programs have not reached 100%. But we ensure
+that for the given test cases, the translated Rust code, can function correctly in
+correspondence to the test cases.
+
+Future initiatives could apply RustMap to more C projects, to explore the
+promise and peril of using LLMs, as there are so many interesting but different
+code features in C and Rust that may benefit from LLM-based translation.
+
+26
+
+Cai et al.
+
+Various steps in RustMap involve customized prompts to deal with different
+code patterns and translation errors, which involved much manual effort in de-
+veloping the prompt templates and deciding which prompts to use for different
+situations. Future efforts could automate and systematize the prompting process
+better involving various LLM-based agents, especially for large-scale projects.
+This would involve developing frameworks and tools to facilitate the efficient
+and accurate translation of extensive C codebases. An integration and valida-
+tion phase using static analysis and testing tools to evaluate C and Rust code
+complexity and functionality could also be beneficial. For intricate code seg-
+ments, symbolic execution might be employed for preemptive issue resolution.
+Additionally, enhancing ChatGPT’s role in translating C to Rust and improving
+test coverage could streamline the process, ensuring the accuracy and function-
+ality of the converted code.
+
+Further efforts could also explore improving the speed of array pointer alias-
+ing, vector copying, and restoration through multithreading, despite potential
+trade-offs in machine performance. This enhancement aims to optimize the ef-
+ficiency of handling arrays and vectors in the translated code, mitigating some
+performance issues encountered in the current conversion process.
+
+6 Related work
+
+Unsafe Rust code has been used extensively [2] by developers, as it is difficult
+to write safe code that implements complex and efficient operations under the
+restrictions of the Rust type system. Efforts to reduce the amount of unsafe
+code in Rust, in the context of Rust translated using C2Rust, have been di-
+verse and significant. CRustS [37] utilizes TXL source-to-source transformation
+rules to minimize the extent of unsafe expressions in the translated Rust code.
+Laertes [17, 18] concentrates on diminishing unsafe code by addressing import
+and lifetime errors related to raw pointers, a common issue in translations from
+C. Meanwhile, Crown [67] offers a suite of analyses aimed at inferring the owner-
+ship models of C pointers, facilitating their translation into safe Rust equivalents.
+Hong et al. [25] used a static analysis based on abstract interpretation, comple-
+mented by the concept of abstract read/write sets, to replace output parameters
+(i.e., pointer-type parameters for producing outputs) in C programs with ‘Op-
+tion/Result‘ (the return type of a function that represents functions returning
+multiple values and may fail) in the translated Rust code. Hong et al. [26] further
+developed static analysis to identify tag fields and values, using must-points-to
+analysis and heuristics, to replace unions with tagged unions during C-to-Rust
+translation. Further, Hong et al. [27] proposed tools to port entire C programs
+to Rust by translating each C function to a Rust function with a signature con-
+taining proper Rust types through type migration with the help of LLM, but
+they have not been able to resolve all type errors to produce executable Rust
+programs.
+
+LLMs have also been applied in different ways to help translate programs
+to Rust. Zhang et al. [66] utilize type compatibility and feature mapping be-
+
+RustMap: Project-Scale C-to-Rust Migration
+
+27
+
+tween source and target languages to facilitate translation and have achieved
+meaningful results when translating Go code to Rust. Eniser et al. [19] evaluate
+various LLM models on translating a few Go and C programs to Rust; they use
+differential fuzzing to check if a Rust translation is I/O equivalent to the orig-
+inal source program and use feedback mechanisms to repair faulty translation.
+They achieved a translation success rate of about 47% and provided insights for
+improvements. Although we share a similar high-level idea of using LLMs for
+translation, our approach uses different code break-down strategy and different
+mechanisms to check code correctness and provide feedback for LLMs. It would
+be valuable future work to explore and compare different strategies in using
+LLMs and agent workflows to improve the translation results further.
+
+In the realm of Rust synthesis, there have been innovative attempts to en-
+hance safety and correctness. Synthetic Ownership Logic (SOL) [20] aims to
+provide correct-by-construction programs in safe Rust. Furthermore, the pro-
+gram synthesis for Rust library API testing [52] explores the synthesis of safe
+Rust code while dealing with unsafe code.
+
+Regarding the verification of Unsafe Rust, notable advancements have been
+made. RustBelt [31] offers the first formal (and machine-checked) safety proof
+for Rust. Building on this, RustHornBelt [39] extends these proofs to ensure the
+soundness of Rust APIs implemented with unsafe Rust code. Recently, [50] has
+studied on how to implement a novel embedding of Rust code into fixed-sized
+vectors to categorize and find Rust common fix patterns.
+
+Recent research covers a range of topics: [9] explores the impact of unstable
+features on package compilation, [68] presents a technique for automatic fuzz
+target synthesis in Rust libraries, [41] studies safety requirements in unsafe Rust
+code, [65] examines differences between paid and volunteer developers in the
+Rust community, [55] introduces a tool for fixing ownership-rule violations, [10]
+analyzes the effectiveness of Clippy lints, [61] investigates security vulnerabilities
+in Rust packages, and [64] demonstrates the use of KLEE for detecting unrecov-
+erable errors. These papers provide significant insights and tools that contribute
+to the security, reliability, and development practices of the Rust ecosystem,
+while targeting different problems from our C-to-Rust code translation problem.
+
+7 Conclusion & Future Work
+
+Unlike previous translation tools such as C2Rust, which focused primarily on
+syntactic conversions without considering functional integrity, our approach,
+RustMap, with large language models (LLM) and program analysis, shows much
+potential in performing more semantic-aware, project-scale code translation. We
+have successfully translated 125 RosettaCode programs and the bzip2 file com-
+pression program into Rust, enhancing the functional usability of the translated
+Rust code with better code safety and readability.
+
+Looking ahead, we plan to expand our project scope to include more compre-
+hensive translations from C to Rust, to further explore the capabilities of LLMs
+in aiding code conversion of diverse features and to conduct more performance
+
+28
+
+Cai et al.
+
+evaluations. Our long-term aim is to ensure not only the functionality, read-
+ability, safety, but also performance of translated code and their compatibility
+with untranslated code, fulfilling the promise of Rust to replace C as a better
+programming language.
+
+References
+
+1. Ahmed, T., Pai, K.S., Devanbu, P., Barr, E.: Automatic semantic augmenta-
+tion of language model prompts (for code summarization). In: Proceedings of
+the IEEE/ACM 46th International Conference on Software Engineering. pp. 1–
+13 (2024)
+
+2. Astrauskas, V., Matheja, C., Poli, F., Müller, P., Summers, A.J.: How do pro-
+grammers use unsafe rust? Proc. ACM Program. Lang. 4(OOPSLA) (nov 2020).
+https://doi.org/10.1145/3428204, https://doi.org/10.1145/3428204
+
+3. Bahmann, H., Reissmann, N., Jahre, M., Meyer, J.C.: Perfect reconstructability of
+control flow from demand dependence graphs. ACM Trans. Archit. Code Optim.
+11(4) (jan 2015). https://doi.org/10.1145/2693261, https://doi.org/10.114
+5/2693261
+
+4. Bang, I., Kayondo, M., Moon, H., Paek, Y.: TRUST: A compilation framework for
+in-process isolation to protect safe rust against untrusted code. In: 32nd USENIX
+Security Symposium (USENIX Security). Baltimore, MD, USA. (2023)
+
+5. Bui, N.D., Yu, Y., Jiang, L.: Infercode: Self-supervised learning of code represen-
+tations by predicting subtrees. In: 2021 IEEE/ACM 43rd International Conference
+on Software Engineering (ICSE). pp. 1186–1197. IEEE (2021)
+
+6. C++ Reference: Static initialization order fiasco, https://en.cppreference.co
+
+m/w/cpp/language/siof
+
+7. casey: Awesome rewrite it in rust (2024), https://github.com/casey/awesome-r
+ewrite-it-in-rust, a curated list of replacements for existing software written
+in Rust
+
+8. Chen, Q., Xia, X., Hu, H., Lo, D., Li, S.: Why my code summarization model does
+not work: Code comment improvement with category prediction. ACM Transac-
+tions on Software Engineering and Methodology (TOSEM) 30(2), 1–29 (2021)
+9. Chenghao Li, Y.W.: Demystifying compiler unstable feature usage and impacts in
+the rust ecosystem. In: Proceedings of the International Conference on Software
+Engineering (ICSE) (2024)
+
+10. Chunmiao Li, Y.Y.: Unleashing the power of clippy in real-world rust projects.
+In: Proceedings of the International Conference on Software Engineering (ICSE)
+(2024)
+
+11. Crates.io: Complexity—calculate cognitive complexity of rust code (2024), https:
+
+//crates.io/crates/complexity
+
+12. Deligiannis, P., Lal, A., Mehrotra, N., Rastogi, A.: Fixing rust compilation errors
+using llms. arXiv preprint arXiv:2308.05177 (2023), https://arxiv.org/abs/23
+08.05177
+
+13. Developer, I.: Introduction to big endian and little endian (2024), https://deve
+
+loper.ibm.com/articles/au-endianc/#end, accessed: 2024-05-30
+
+14. developer.arm.com: Complex macros in c (2024), https://developer.arm.com/
+documentation/101655/latest/Cx51-User-s-Guide/Preprocessor/Macros/Com
+plex-Macros
+
+RustMap: Project-Scale C-to-Rust Migration
+
+29
+
+15. Documentation, A.: Pointer aliasing (2024), https://docs.amd.com/r/en-US/ug
+1079-ai-engine-kernel-coding/Pointer-Aliasing, accessed: 2024-05-30
+16. Du, M., Luu, A.T., Ji, B., Ng, S.K.: Mercury: An efficiency benchmark for llm code
+
+synthesis. arXiv preprint arXiv:2402.07844 (2024)
+
+17. Emre, M., Boyland, P., Parekh, A., Schroeder, R., Dewey, K., Hardekopf, B.: Alias-
+ing limits on translating c to safe rust. Proceedings of the ACM on Programming
+Languages 7(OOPSLA1), 551–579 (2023)
+
+18. Emre, M., Schroeder, R., Dewey, K., Hardekopf, B.: Translating c to safer rust.
+Proceedings of the ACM on Programming Languages 5(OOPSLA), 1–29 (2021)
+19. Eniser, H.F., Zhang, H., David, C., Wang, M., Christakis, M., Paulsen, B., Dodds,
+J., Kroening, D.: Towards translating real-world code with LLMs: A study of trans-
+lating to rust. arXiv preprint arXiv:2405.11514 (2024)
+
+20. Fiala, J., Itzhaky, S., Müller, P., Polikarpova, N., Sergey, I.: Leveraging rust
+types for program synthesis. Proceedings of the ACM on Programming Languages
+7(PLDI), 1414–1437 (2023)
+
+21. Forum, R.U.: Lifetime issue: Slice of slices. https://users.rust-lang.org/t/li
+
+fetime-issue-slice-of-slices/80848 (2023), accessed: 2024-06-08
+
+22. Graham, S.L., Kessler, P.B., McKusick, M.K.: Gprof: A call graph execution pro-
+filer. ACM Sigplan Notices 17(6), 120–126 (1982), https://sourceware.org/bin
+utils/docs/gprof/
+
+23. Gu, Q.: Llm-based code generation method for golang compiler testing. In: Pro-
+ceedings of the 31st ACM Joint European Software Engineering Conference and
+Symposium on the Foundations of Software Engineering. pp. 2201–2203 (2023)
+24. Guo, Q., Cao, J., Xie, X., Liu, S., Li, X., Chen, B., Peng, X.: Exploring the po-
+tential of ChatGPT in automated code refinement: An empirical study. CoRR
+abs/2309.08221 (2023). https://doi.org/10.48550/ARXIV.2309.08221,
+https://doi.org/10.48550/arXiv.2309.08221
+
+25. Hong, J., Ryu, S.: Don’t write, but return: Replacing output parameters with
+algebraic data types in C-to-Rust translation. Proceedings of the ACM on Pro-
+gramming Languages 8(PLDI), 716–740 (2024)
+
+26. Hong, J., Ryu, S.: To tag, or not to tag: Translating C’s unions to Rust’s tagged
+unions. In: Proceedings of the 39th IEEE/ACM International Conference on Au-
+tomated Software Engineering. pp. 40–52 (2024)
+
+27. Hong, J., Ryu, S.: Type-migrating C-to-Rust translation using a large language
+
+model. Empirical Software Engineering 30(1), 3 (2025)
+
+28. Immunant, I.: c2rust - c to rust translation and more (2024), https://github.c
+
+om/immunant/c2rust#faq, accessed: 2024-06-03
+
+29. InfoQ: Rust reviewed: the current trends and pitfalls of the ecosystem (2023),
+https://www.infoq.com/articles/rust-ecosystem-review-2023/, a review of
+the current trends and pitfalls in the Rust ecosystem
+
+30. Islam, R., Moushi, O.M.: Gpt-4o: The cutting-edge advancement in multimodal
+
+llm. Authorea Preprints (2024)
+
+31. Jung, R., Jourdan, J.H., Krebbers, R., Dreyer, D.: Rustbelt: Securing the founda-
+tions of the rust programming language. Proceedings of the ACM on Programming
+Languages 2(POPL), 1–34 (2017)
+
+32. Klabnik, S., Nichols, C.: The rust programming language - unsafe rust (2024),
+https://doc.rust-lang.org/book/ch19-01-unsafe-rust.html#accessing-o
+r-modifying-a-mutable-static-variable, accessed: 2024-05-30
+
+33. Kotlyarov, D.: Crate goto (2024), https://docs.rs/goto/latest/goto/
+34. rust lang.org: Unsafe rust (2023), https://doc.rust-lang.org/book/ch19-01-u
+
+nsafe-rust.html, accessed: 2023-11-18
+
+30
+
+Cai et al.
+
+35. Lazytiger, et al.: What is the proper way to use lazy_static variables safely and
+briefly (2023), https://users.rust-lang.org/t/what-is-the-proper-way-t
+o-use-lazy-static-variables-safely-and-briefly/94739, accessed: 2024-05-
+27
+
+36. LearnCpp.com: Switch fallthrough and scoping. https://www.learncpp.com/cpp
+-tutorial/switch-fallthrough-and-scoping/ (2024), accessed: 2024-06-08
+37. Ling, M., Yu, Y., Wu, H., Wang, Y., Cordy, J.R., Hassan, A.E.: In rust we trust:
+a transpiler from unsafe c to safer rust. In: Proceedings of the ACM/IEEE 44th
+International Conference on Software Engineering: Companion Proceedings. pp.
+354–355 (2022)
+
+38. Liu, J., Xia, C.S., Wang, Y., Zhang, L.: Is your code generated by chatgpt really
+correct? rigorous evaluation of large language models for code generation. Advances
+in Neural Information Processing Systems 36 (2024)
+
+39. Matsushita, Y., Denis, X., Jourdan, J.H., Dreyer, D.: Rusthornbelt: a semantic
+foundation for functional verification of rust programs with unsafe code. In: Pro-
+ceedings of the 43rd ACM SIGPLAN International Conference on Programming
+Language Design and Implementation. pp. 841–856 (2022)
+
+40. Mertens, E., Langley, T.: C2Rust: Migrating C to safe Rust (2018), https://galo
+
+is.com/blog/2018/08/c2rust/, accessed: 2024-05-24
+
+41. Mohan Cui, S.S.: Is unsafe an achilles’ heel? a comprehensive study of safety re-
+quirements in unsafe rust programming. In: Proceedings of the International Con-
+ference on Software Engineering (ICSE) (2024)
+
+42. Mol, M.: Rosetta code, https://rosettacode.org, accessed: 2024-05-29
+43. Nam, D., Macvean, A., Hellendoorn, V., Vasilescu, B., Myers, B.: Using an llm to
+help with code understanding. In: Proceedings of the IEEE/ACM 46th Interna-
+tional Conference on Software Engineering. pp. 1–13 (2024)
+44. OpenAI: GPT-4 technical report. Tech. rep., OpenAI (2024)
+45. Pan, R., Ibrahimzada, A.R., Krishna, R., Sankar, D., Wassi, L.P., Merler, M.,
+Sobolev, B., Pavuluri, R., Sinha, S., Jabbarvand, R.: Lost in translation: A study
+of bugs introduced by large language models while translating code. In: Proceedings
+of the IEEE/ACM 46th International Conference on Software Engineering. pp. 1–
+13 (2024)
+
+46. Peterson, W.W., Kasami, T., Tokura, N.: On the capabilities of while, repeat, and
+
+exit statements. Communications of the ACM 16(8), 503–512 (1973)
+47. Poznyakoff, S.: Gnu cflow (2005), https://www.gnu.org/software/cflow/
+48. Qin, B., Chen, Y., Yu, Z., Song, L., Zhang, Y.: Understanding memory and
+thread safety practices and issues in real-world rust programs. In: Proceedings
+of the 41st ACM SIGPLAN Conference on Programming Language Design and
+Implementation. p. 763–779. PLDI 2020, Association for Computing Machinery,
+New York, NY, USA (2020). https://doi.org/10.1145/3385412.3386036,
+https://doi.org/10.1145/3385412.3386036
+
+49. Ramsey, N.: Beyond relooper: recursive translation of unstructured control flow to
+structured control flow (functional pearl). Proc. ACM Program. Lang. 6(ICFP)
+(aug 2022). https://doi.org/10.1145/3547621, https://doi.org/10.1145/35
+47621
+
+50. Robati Shirzad, M., Lam, P.: A study of common bug fix patterns in rust. Empirical
+
+Software Engineering 29(2), 44 (2024)
+
+51. Seward, J.: bzip2 (2023), https://sourceware.org/bzip2/, accessed: 2024-06-04
+52. Takashima, Y., Martins, R., Jia, L., Păsăreanu, C.S.: Syrust: automatic testing of
+rust libraries with semantic-aware program synthesis. In: Proceedings of the 42nd
+
+RustMap: Project-Scale C-to-Rust Migration
+
+31
+
+ACM SIGPLAN International Conference on Programming Language Design and
+Implementation. p. 899–913. PLDI 2021, Association for Computing Machinery,
+New York, NY, USA (2021). https://doi.org/10.1145/3453483.3454084,
+https://doi.org/10.1145/3453483.3454084
+
+53. TaKO8Ki: Awesome alternatives in rust (2024), https://github.com/TaKO8Ki
+/awesome-alternatives-in-rust, a curated list of replacements for existing
+software written in Rust
+
+54. Tarjan, R.: Depth-first search and linear graph algorithms. SIAM journal on com-
+
+puting 1(2), 146–160 (1972)
+
+55. Wenzhang Yang, L.S.: Rust-lancet: Automated ownership-rule-violation fixing with
+behavior preservation. In: Proceedings of the International Conference on Software
+Engineering (ICSE) (2024)
+
+56. White, J., Other, A.: ChatGPT prompt patterns for improving code qual-
+ity, refactoring, requirements elicitation, and software design. arXiv preprint
+arXiv:2303.07839 (2023)
+
+57. Wikipedia: Cyclomatic complexity (2024), https://en.wikipedia.org/wiki/Cy
+
+clomatic_complexity
+
+58. Wikipedia: Redox (operating system) (2024), https://en.wikipedia.org/wiki/
+
+Redox_(operating_system)
+
+59. Wikipedia: Rust for linux (2024), https://en.wikipedia.org/wiki/Rust_for_L
+
+inux
+
+60. Wikipedia: Type punning (2024), https://en.wikipedia.org/wiki/Type_punni
+
+ng#C_and_C++
+
+61. Xiaoye Zheng, Z.W.: A closer look at the security risks in the rust ecosystem. ACM
+
+Transactions on Software Engineering and Methodology (TOSEM) (2024)
+
+62. Xu, F.F., Alon, U., Neubig, G., Hellendoorn, V.J.: A systematic evaluation of large
+language models of code. In: Proceedings of the 6th ACM SIGPLAN International
+Symposium on Machine Programming. pp. 1–10 (2022)
+
+63. Yang, Z., Liu, F., Yu, Z., Keung, J.W., Li, J., Liu, S., Hong, Y., Ma, X., Jin, Z.,
+Li, G.: Exploring and unleashing the power of large language models in automated
+code translation. arXiv preprint arXiv:2404.14646 (2024)
+
+64. Ying Zhang, P.L.: Broadly enabling klee to effortlessly find unrecoverable errors
+in rust. In: Proceedings of the International Conference on Software Engineering
+(ICSE) (2024)
+
+65. Yuxia Zhang, M.Q.: How are paid and volunteer open source developers different?
+a study of the rust project. In: Proceedings of the International Conference on
+Software Engineering (ICSE) (2024)
+
+66. Zhang, H., David, C., Wang, M., Paulsen, B., Kroening, D.: Scalable, validated
+code translation of entire projects using large language models. arXiv preprint
+arXiv:2412.08035 (2024)
+
+67. Zhang, H., David, C., Yu, Y., Wang, M.: Ownership guided C to Rust translation.
+
+arXiv preprint arXiv:2303.10515 (2023)
+
+68. Zhiwu Xu, B.W.: RPG: Rust library fuzzing with pool-based fuzz target generation
+and generic support. In: Proceedings of the International Conference on Software
+Engineering (ICSE) (2024)
+
+

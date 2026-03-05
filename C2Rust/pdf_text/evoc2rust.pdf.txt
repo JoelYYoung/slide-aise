@@ -1,0 +1,1704 @@
+EvoC2Rust: A Skeleton-guided Framework for Project-Level
+C-to-Rust Translation
+Tingrui Yu
+Shanghai Jiao Tong University
+Shanghai, China
+hzfsls@sjtu.edu.cn
+
+Beijun Shen∗
+Shanghai Jiao Tong University
+Shanghai, China
+bjshen@sjtu.edu.cn
+
+Chaofan Wang
+Shanghai Jiao Tong University
+Shanghai, China
+chaofwang@sjtu.edu.cn
+
+6
+2
+0
+2
+
+n
+a
+J
+
+3
+1
+
+]
+E
+S
+.
+s
+c
+[
+
+4
+v
+5
+9
+2
+4
+0
+.
+8
+0
+5
+2
+:
+v
+i
+X
+r
+a
+
+Jie Wang
+Huawei Technologies Co., Ltd
+Beijing, China
+wangjie451@huawei.com
+
+Yuling Shi
+Shanghai Jiao Tong University
+Shanghai, China
+yuling.shi@sjtu.edu.cn
+
+Dong Chen
+Huawei Technologies Co., Ltd
+Beijing, China
+chendong108@huawei.com
+
+Chen Xie
+Shanghai Jiao Tong University
+Shanghai, China
+dindin_xc@sjtu.edu.cn
+
+Wenrui Zhang
+Huawei Technologies Co., Ltd
+Beijing, China
+zhangwenrui8@huawei.com
+
+Xiaodong Gu
+Shanghai Jiao Tong University
+Shanghai, China
+xiaodong.gu@sjtu.edu.cn
+
+Abstract
+
+Translating legacy C codebases to Rust is increasingly demanded
+for building safety-critical systems. While various approaches have
+emerged for this task, they face inherent trade-offs: rule-based
+methods often struggle to satisfy code safety and idiomaticity re-
+quirements, while LLM-based methods frequently fail to generate
+semantically equivalent Rust code, due to the heavy dependencies
+of modules across the entire codebase. Recent studies have revealed
+that both solutions are limited to small-scale programs. In this paper,
+we propose EvoC2Rust, an automated framework for converting
+complete C projects to equivalent Rust ones. EvoC2Rust employs
+a skeleton-guided translation strategy for project-level translation.
+The pipeline consists of three stages: 1) it first decomposes the
+C project into functional modules, employs a feature-mapping-
+enhanced LLM to transform definitions and macros, and generates
+type-checked function stubs, which form a compilable Rust skele-
+ton; 2) it then incrementally translates functions, replacing the
+corresponding stub placeholders; 3) finally, it repairs compilation
+errors by integrating LLM and static analysis. Through evolutionary
+augmentation, EvoC2Rust combines the advantages of both rule-
+based and LLM-based solutions. Our evaluation on open-source
+benchmarks and six industrial projects demonstrates the superior
+performance of EvoC2Rust in project-level C-to-Rust translation.
+The results show that our approach outperforms the strongest LLM-
+based baseline by 17.24% in syntax accuracy and 14.32% in semantic
+accuracy, while also achieving a 43.59% higher code safety rate than
+the best rule-based tool.
+
+∗Corresponding author.
+
+This work is licensed under a Creative Commons Attribution 4.0 International License.
+ICSE-SEIP ’26, Rio de Janeiro, Brazil
+© 2026 Copyright held by the owner/author(s).
+ACM ISBN 979-8-4007-2426-8/2026/04
+https://doi.org/10.1145/3786583.3786856
+
+CCS Concepts
+• Software and its engineering → Source code generation; •
+Computing methodologies → Machine translation.
+
+Keywords
+
+C-to-Rust Translation, Complete Project Conversion, Skeleton Guided,
+Feature Mapping, Large Language Models
+
+ACM Reference Format:
+Chaofan Wang, Tingrui Yu, Beijun Shen, Jie Wang, Dong Chen, Wen-
+rui Zhang, Yuling Shi, Chen Xie, and Xiaodong Gu. 2026. EvoC2Rust: A
+Skeleton-guided Framework for Project-Level C-to-Rust Translation. In 2026
+IEEE/ACM 48th International Conference on Software Engineering (ICSE-SEIP
+’26), April 12–18, 2026, Rio de Janeiro, Brazil. ACM, New York, NY, USA,
+12 pages. https://doi.org/10.1145/3786583.3786856
+
+1 Introduction
+
+The translation of legacy C code to Rust is gaining significant at-
+tention in software engineering, spurred by critical memory safety
+concerns [7, 25]. Such vulnerabilities constitute the most preva-
+lent category of critical security defects in production C systems,
+accounting for approximately 70% of high-severity vulnerabilities
+in industry reports from Google and Microsoft [28]. This has ac-
+celerated a paradigm shift toward compile-time safety guarantees
+through safe programming languages [33]. In response, Rust has
+emerged as a leading alternative that offers memory safety by en-
+forcing a strict ownership and borrowing model [45].
+
+Recent work proposes rule-based tools [1, 15, 51], which convert
+C code to Rust using primarily syntax-based transformations on
+a terse intermediate representation of compilation. Such transla-
+tion inherently generates non-idiomatic Rust code with low-level
+constructs and may also contain semantic inaccuracies. [35]. An-
+other line of work proposes LLM-based techniques [12, 26, 31, 48]
+to utilize the code comprehension capability of code LLMs. Due to
+the lack of parallel C-Rust training data and significant linguistic
+differences, these approaches often fail to produce semantically
+equivalent Rust code [34].
+
+ 
+ 
+ 
+ 
+ 
+ 
+ICSE-SEIP ’26, April 12–18, 2026, Rio de Janeiro, Brazil
+
+Wang et al.
+
+Figure 1: Overview of EvoC2Rust.
+
+While automated code translation has been extensively inves-
+tigated [9, 20, 36, 41, 49, 53], the translation of C-to-Rust projects
+poses special challenges:
+
+Challenge-1: Substantial linguistic discrepancies for ensur-
+ing safety. C and Rust differ fundamentally in their safety models.
+C permits loose type checking, unrestricted pointer arithmetic,
+and manual memory management, whereas Rust enforces strict
+compile-time type safety, ownership-based memory guarantees,
+and disciplined reference usage through its borrowing rules. Ex-
+isting rule-based translators often compromise safety by relying
+on raw pointers, unsafe blocks, or external C functions [35]. While
+LLM-based approaches can generate code with improved safety,
+they often lack sufficient context understanding (e.g., variable scope
+or pointer lifetimes), potentially leading to logical errors or memory
+safety violations in the translated Rust code [40]. As a result, nei-
+ther rule-based nor LLM-based methods alone reliably meet Rust’s
+stringent safety requirements.
+
+Challenge-2: Project-level code dependence. Translating
+complete C projects poses greater challenges than translating iso-
+lated functions because the translated Rust project must preserve
+cross-module dependencies and consistent project-level structure [37,
+39]. Code LLMs often struggle with such large-scale context [50],
+leading to broken references, inconsistent APIs, or incorrect mod-
+ule boundaries [35, 43]. Consequently, existing approaches tend to
+perform well only on small-scale programs (e.g., ≤100 LoC) [11, 12],
+and fall short in real-world project settings.
+
+In this work, we propose EvoC2Rust, an automated frame-
+work for translating complete C projects into equivalent Rust code.
+To address the linguistic gap and ensure safety (Challenges 1),
+EvoC2Rust enhances LLMs with safety-preserving mappings across
+seven core linguistic features, including types, macros, functions,
+operators, syntax structures, globals, and variadic arguments. To en-
+able project-level translation (Challenge 2), EvoC2Rust introduces
+a skeleton-guided translation strategy that proceeds in three stages.
+First, it analyzes the input C project to extract high-level metadata
+
+and decomposes the project into functional modules, generating
+a compilable Rust skeleton with placeholder functions. Next, it
+incrementally translates these stubs using LLMs augmented with
+the predefined feature mappings. Finally, it combines LLMs with
+static analysis to iteratively repair compilation errors and refine the
+output. This evolutionary process effectively blends the strengths
+of rule-based and learning-based approaches, striking a practical
+balance between correctness and safety in automated C-to-Rust
+migration.
+
+We evaluate EvoC2Rust using an open-source benchmark Vivo-
+Bench [42] and a self-collected dataset of six industrial projects. Ex-
+perimental results demonstrate that EvoC2Rust significantly out-
+performs existing baselines in project-level C-to-Rust translation.
+In comparison with LLM-based approaches, EvoC2Rust improves
+the compilation pass rate by 17.24–50.84% and the line acceptance
+rate by 14.32–44.79%, while also achieving marginally better code
+safety. When compared to rule-based methods, EvoC2Rust attains
+a 43.59–96.79% higher code safety rate, while maintaining competi-
+tive performance in terms of compilation and line acceptance rates.
+Furthermore, at the module level, EvoC2Rust achieves a 92.25%
+compilation success rate and an 89.53% test pass rate on industrial
+projects.
+
+The contributions of our work are summarized as follows:
+• We propose a novel skeleton-guided framework that over-
+comes the barrier of inter-module dependencies to enable the
+translation of complete C projects into Rust.
+
+• We define safety-preserving mappings between core linguistic
+features of C and Rust to enhance LLMs’ safety awareness.
+• We evaluate EvoC2Rust on both open-source and industrial
+scenarios. Experimental results show that EvoC2Rust out-
+performs existing baselines, effectively translating C projects
+to correct and safe Rust code.
+
+Our source code and experimental data are publicly available at
+
+https://github.com/bbzswcf/EvoC2rust.
+
+FunctionFunctionMetaDataMetaDataTransformationC ProjectC Project DecompositionInitialRust ProjectRustProjectFeature MappingsSkeletonConstructionPost-Generation RepairMacroDefinitionFunctionSignatureBodyModule TranslationC ModulesMacroDefinitionDummyFunctionFunctionRust ModulesRustSkeletonFillingBracket RepairRule-based RepairLLM RefinementCode TranslationRust CompilerRust ProjectAssemblyRust CompilerEvoC2Rust: A Skeleton-guided Framework for Project-Level C-to-Rust Translation
+
+ICSE-SEIP ’26, April 12–18, 2026, Rio de Janeiro, Brazil
+
+Table 1: Type Mappings between C and Rust
+
+C Type
+
+C Example
+
+Rust Type
+
+Rust Example
+
+int[N]
+int *
+char *
+
+int a[3] = {1, 2, 3}
+int *a = &b
+char *c = "Hello World!"
+typedef
+(*MyFunc)
+int
+(const void *, const void *)
+FILE *f = fopen(name, "rb")
+va_start(arg_ptr, prev)
+
+Array<i32, N>
+Ptr<i32>
+Ptr<u8>
+
+FuncPtr
+
+FilePtr
+VaList
+
+let mut a: Array<i32,3> = arr![1,2,3]
+let mut a: Ptr<i32> = c_ref!(b)
+let mut c=cstr!("Hello World!")
+pub type MyFunc=FuncPtr<fn(Ptr<Void>,
+Ptr<Void>) -> i32>
+let mut f=c_fopen!(name, cstr("rb"))
+(. . . , prev: . . . , arg_ptr: VaList)
+
+Type
+
+Array
+Pointer
+String
+
+Function Pointer
+
+(*func)
+
+File
+Variadic Argument
+
+FILE *
+va_list
+
+2 Approach
+
+Figure 1 illustrates the architecture of EvoC2Rust. It contains three
+key steps: (1) Skeleton Construction decomposes the C project into
+modules and constructs a Rust project skeleton to assemble the Rust
+modules (Section 2.1); (2) Module Translation incrementally converts
+definitions, macros, and functions using safety-preserving linguistic
+mappings (Section 2.2); and (3) Post-Generation Repair combines
+LLM-based refinement with static analysis for code optimization
+(Section 2.3).
+
+2.1 Project Skeleton Construction
+
+A straightforward idea of project-level code translation is to trans-
+late each function individually and assemble them into a project.
+However, naively aggregating translated functions often leads to
+cascading interdependency errors. To address this, EvoC2Rust em-
+ploys a skeleton-guided translation strategy, which first constructs
+a compilable Rust project skeleton based on project metadata and
+then incrementally populates it with translated function implemen-
+tations.
+
+Given a C project, EvoC2Rust first parses the source code us-
+ing Tree-sitter [3] to extract key syntactic elements and abstract
+them into a unified project metadata representation. This meta-
+data captures structural information including filenames, include
+statements, macro definitions, type declarations, global identifiers,
+function signatures, and a mapping table between identifier decla-
+rations to source files. They are then systematically transformed
+into Rust equivalents via rule-based conversion. For instance, C
+include dependencies are transformed to Rust use imports, and
+identifier declarations are converted into Rust pub use statements
+(e.g., pub use {Rust_filename}::{identifier_name}) using the
+declaration-to-file table.
+
+Using the converted metadata, EvoC2Rust constructs a Rust
+project skeleton—comprising Rust constructs automatically trans-
+lated from C definitions, macros, and function signatures—that accu-
+rately preserves the structural organization of the original C project.
+Each C function is assigned a type-checked dummy counterpart
+in Rust using its translated signature and the unimplemented!()
+macro. These placeholders serve as safe stand-ins, allowing the
+project to compile successfully even before the actual function
+bodies are translated.
+
+The skeleton provides a stable framework that allows function
+bodies to be translated and integrated incrementally. This ensures
+each addition is contextually correct and free from dependency
+
+errors, enabling a seamless and scalable translation process even
+for large-scale projects with complex interactions.
+
+2.2 Module Translation with Safety-preserving
+
+Mapping
+
+EvoC2Rust employs an LLM to automatically translate C modules
+into Rust constructs, converting definitions, macros, and function
+signatures to assemble the skeleton, and then transforming func-
+tion bodies to populate the placeholder dummy functions within
+the skeleton. To preserve safety and semantic alignment during
+translation, EvoC2Rust augments the LLM with a comprehensive
+set of linguistic mappings across seven key categories:
+
+1) Type Mapping. Each C type is associated with a semantically
+consistent Rust counterpart, as summarized in Table 1. For example,
+to represent C-style strings, we introduce a cstr!() macro in Rust
+that guarantees null termination, thereby avoiding inconsistencies
+in downstream operations such as encryption and compression.
+Beyond simple type correspondences, we also capture the oper-
+ational semantics of C types. Since C pointers permit arithmetic
+(e.g., addition, subtraction), the address-of operator, and array-style
+subscripting, we implement equivalent traits in Rust to mirror these
+behaviors. Likewise, to model the implicit decay of C arrays into
+pointers, we provide an explicit cast() method. Together, these
+mappings reduce the complexity of translating raw C pointers by
+supplying direct Rust equivalents for a wide range of pointer classes
+and operations.
+
+2) Type Conversion. We introduce a custom CastIntoTyped trait
+to handle type conversions in Rust, supporting both integer-to-
+integer and pointer-to-pointer conversions. For safety, pointer-to-
+integer casts are allowed, but integer-to-pointer casts are strictly
+disallowed. For instance, the C expression ‘a = (uint16_t) b’ is
+translated as ‘a = b.cast::<u16>()’, and ‘pi = (int*)pu’ be-
+comes ‘pi = pu.cast::<Ptr<i32>>()’. To simulate C’s implicit
+conversion semantics in Rust’s type-inferred context, we also pro-
+vide a typeless cast() method. This proves particularly effective
+during the repair phase, where it substantially increases the success
+rate of LLM-driven optimization by efficiently resolving type errors
+stemming from implicit conversions in the original C code.
+
+3) Macro/Function Mapping. We provide Rust counterparts for
+native C macros such as NULL and LINE, as well as for common C
+library functions including malloc, free, and memcpy. These im-
+plementations prioritize safe abstractions over direct invocations
+of unsafe primitives. For example, rather than relying on the unsafe
+
+ICSE-SEIP ’26, April 12–18, 2026, Rio de Janeiro, Brazil
+
+Wang et al.
+
+Table 2: An Example of Transformation Patterns
+
+Pattern Name:
+
+Variadic Argument Mapping
+
+Motivation:
+
+Rust does not support C-style variadic functions (e.g., va_list).
+
+Consequence:
+
+Current LLMs cannot directly translate C’s variadic features.
+
+Solution:
+
+Define a VaList type and va_format! macro:
+pub type VaList<’a> = &’a [&’a dyn Display];
+
+macro_rules! va_format { . . . }
+
+Example:
+C Code:
+
+int snprintf(char *str, size_t size, const char *format, . . . )
+{ . . . }
+Rust Code:
+
+pub fn snprintf(mut buf: Ptr<u8>, size: usize, format: Ptr<u8>,
+
+va: VaList) -> i32 {
+
+let mut fmt = format.to_string(); . . .
+return length; }
+
+std::ptr::copy to implement memmove, we employ a safer alter-
+native. By explicitly incorporating these mappings into the prompt,
+we guide the LLM to apply them consistently, enabling systematic
+translations such as converting the C function name() into the Rust
+macro c_name!().
+
+4) Syntax Structure Mapping. Certain C control flow constructs
+lack direct semantic equivalents in Rust, posing a risk of logical
+errors if translated literally. Specifically, Rust’s for loop operates
+differently from C’s, C’s do while has no native counterpart, and
+switch statements are not fully aligned with Rust’s match. To en-
+sure semantic fidelity, we implement dedicated macros—c_for,
+c_do, and c_switch—that replicate the exact behavior of their C
+counterparts. These are introduced to the LLM via targeted prompts,
+ensuring the original syntax is replaced with the appropriate macro
+calls.
+
+5) Operator Mapping. We provide Rust equivalents for C-specific
+operators such as ++, --, &, and sizeof. The sizeof operator is
+mapped to two distinct macros: c_sizeof!() and c_sizeofval!().
+The increment and decrement operators (++, --) are implemented
+as four generic functions to handle both prefix and postfix forms
+for all integer and pointer types. Notably, the address-of operator &
+is not translated to Rust’s reference operators (& or &mut), but to a
+dedicated c_ref!() macro that correctly obtains a pointer to the
+value.
+
+6) Global Variable Mapping. Because mutable global variables
+(static mut) are inherently unsafe in Rust, we introduce a Global<T>
+wrapper type to manage them safely. This wrapper employs an
+internal Mutex to ensure thread safety, thereby avoiding the need
+for unsafe code blocks. To further simplify usage, we provide a
+global!() macro that supports lazy initialization of global vari-
+ables.
+
+7) Variadic Argument Mapping. Since variadic arguments in C
+are most commonly used for logging and string formatting, we
+
+model the VaList type in Rust as a Slice of references to values
+implementing the Display trait. To support formatting operations,
+we provide a va_format!() macro, which in turn enables Rust
+implementations of variadic C functions such as snprintf.
+
+These feature mappings are formulated as transformation pat-
+terns, each specifying the motivation, consequence, solution, and
+corresponding code examples, as illustrated in Table 2. By distilling
+expertise from senior practitioners, these patterns encode tacit pro-
+fessional knowledge into explicitly reusable C-to-Rust migration
+guidelines.
+
+To steer the LLM toward accurate and idiomatic translations,
+we retrieve the most relevant patterns based on the input C code.
+Specifically, we encode both the code snippet and pattern examples
+into dense vectors, compute cosine similarity, and select the top-K
+matching patterns. These retrieved patterns are then injected into
+the LLM prompt using the following structured template.
+
+Prompt Template for Translating C Modules to Rust
+
+Translate the C [macro/definition/function] to Rust.
+Patterns: {retrieved transformation patterns}
+Demonstrations: {paired C-to-Rust examples}
+C Source Code: {input source code}
+
+2.3 Post-Generation Repair
+
+Finally, EvoC2Rust refines the translated Rust code through a
+compilation-driven, cascading repair process that combines syntac-
+tic rules with LLM-based correction. For each problematic snippet,
+it generates multiple repair candidates based on compiler feed-
+back, retaining only those that reduce error counts until no further
+improvements are possible.
+
+While rule-based techniques efficiently resolve trivial and well-
+defined errors, LLMs excel at addressing complex semantic issues.
+A hybrid strategy—applying rules first, followed by LLM refine-
+ment—yields the best results. We observe, however, that persistent
+low-level syntax errors such as bracket mismatches significantly
+impede both repair methods, particularly rule-based correction. To
+mitigate this, our approach prioritizes bracket repair before other
+fixes, ensuring that basic syntax errors are resolved prior to se-
+mantic analysis. This allows the Rust compiler to provide clearer
+diagnostic information for subsequent repair stages.
+
+Specifically, EvoC2Rust implements a three-step repair chain:
+1) Bracket Repair: An LLM analyzes compiler outputs and error
+messages to correct mismatched brackets and similar syntax issues.
+The prompt includes instructions, exemplar fault-correction pairs,
+the erroneous Rust snippet, and corresponding compilation errors.
+
+Prompt Template for Bracket Repair
+
+Fix the compilation bugs in the following Rust code with the pro-
+vided compilation error messages, possibly because of mismatched
+parentheses. Only correct lines that have unmatched parentheses
+bugs; do not modify any other code.
+Demonstrations: {example pairs of incorrect/correct Rust code}
+Rust Source Code: {input source code}
+Compilation Error Messages: {input error messages}
+
+2) Rule-Based Repair: We define a set of syntax repair rules as
+regex-based transformation patterns to address common syntax-
+level issues. These include adjusting misplaced derive macros,
+removing redundant cast() operations, and resolving problematic
+
+EvoC2Rust: A Skeleton-guided Framework for Project-Level C-to-Rust Translation
+
+ICSE-SEIP ’26, April 12–18, 2026, Rio de Janeiro, Brazil
+
+Table 3: Statistics of the Datasets
+
+Dataset
+
+Projects
+
+Files
+
+Vivo-Bench
+
+C2R-Bench
+
+19 projects
+avl
+bzp
+md5
+sha256
+rapidlz
+cmptlz
+Total
+
+38
+9
+18
+2
+2
+7
+25
+63
+
+LoC
+80∼917
+836
+2258
+324
+280
+748
+3724
+8170
+
+Functions Macros (Functions) Definitions Test Cases
+
+200
+29
+92
+8
+9
+28
+122
+288
+
+29
+29
+82
+20
+11
+38
+166
+346
+
+95
+9
+14
+1
+2
+10
+27
+63
+
+113
+121
+17
+37
+12
+12
+23
+222
+
+array access patterns such as s[s.i], which can cause simultaneous
+mutable and immutable borrow conflicts.
+
+3) LLM Refinement: In the final step, the LLM addresses residual
+semantic discrepancies and intricate compilation errors, such as
+type inconsistencies, unidiomatic usage, or structural mismatches.
+The prompt incorporates guidelines, fault-correction examples,
+the erroneous Rust translation, and relevant compilation feedback.
+These exemplar pairs, which are manually crafted by Rust experts
+and refined through iterative experimentation, cover common re-
+curring errors to enable the LLM to generalize effective correction
+strategies (see our repository for detailed examples).
+
+Prompt Template for LLM Refinement
+
+Fix the compilation bugs in the following Rust code according to
+the compilation information.
+Instruction: {refinement guidelines}
+Demonstrations: {example pairs of incorrect/correct Rust code}
+Rust Source Code: {input source code}
+Compilation Information: {input compilation feedback}
+
+3 Experimental Setup
+
+We conduct experiments to evaluate the effectiveness of EvoC2Rust,
+aiming to answer the following research questions.
+
+• RQ1: How effectively does our method translate complete C
+
+projects to equivalent safe Rust code?
+
+• RQ2: What is the module conversion accuracy achieved by
+
+our method?
+
+• RQ3: To what extent do key components contribute to the
+
+overall performance of our method?
+
+• RQ4: How does our method scale to large projects in terms
+
+of accuracy, safety, and efficiency?
+
+3.1 Comparison Methods
+
+We compare EvoC2Rust against three categories of C-to-Rust trans-
+lation methods: rule-based (C2Rust), LLM-based (Self-Repair and
+Tymcrat), and hybrid techniques (C2SaferRust). We also incorpo-
+rate a direct LLM prompting baseline that translates code without
+repository context. Specifically, the baseline methods evaluated in
+our study are as follows:
+
+• C2Rust [1]: a rule-based C-to-Rust translator that converts
+C code to Rust via AST analysis and manually defined trans-
+formation rules.
+
+• C2SaferRust [30]: a hybrid technique built on C2Rust, aug-
+mented with LLM-based post-processing and test-driven opti-
+mization to enhance the safety and idiomaticity of the trans-
+lated Rust code. We follow the original configuration and use
+5 optimization iterations.
+
+• Self-Repair [23]: a multi-agent self-repair framework for
+project-level C-to-Rust translation. It incrementally performs
+file translation and uses iterative compilation and testing feed-
+back to correct errors automatically. We adopt the default
+setting of 3 self-repair rounds per task.
+
+• Tymcrat [19]: a project-level translation method that im-
+proves translation quality through type migration. It gen-
+erates multiple candidate Rust signatures and refines them
+iteratively using compiler feedback. We use the default config-
+uration, which generates 4 candidate signatures per function.
+• Direct Prompting: a baseline that applies zero-shot LLM
+prompting for direct C-to-Rust translation. To address its
+limitations in preserving project-wide consistency and resolv-
+ing dependencies, we integrate it within our project skeleton
+framework.
+
+3.2 Datasets
+
+We evaluate EvoC2Rust using two benchmarks: the open-source
+Vivo-Bench [42], and our newly introduced C2R-Bench, which
+comprises six industrial projects.
+
+Vivo-Bench is a collection of 19 algorithmic C projects from
+the 2025 Vivo C-to-Rust Innovation Competition, each containing
+1–3 files (33–630 LoC per file). Two senior engineers produced
+the reference Rust translations with LLM assistance. Subsequently,
+they validated the translations by adding tests to achieve complete
+function coverage, resulting in a total of 113 top-level test cases.
+
+To assess translation performance in industrial settings, we con-
+structed C2R-Bench using six production projects from Huawei’s
+software ecosystem. These are single-threaded user-space appli-
+cations using only standard C libraries, characterized by complex
+multi-file architectures (280–3,724 LoC per file) and extensive cross-
+file dependencies. Three senior engineers produced the reference
+Rust implementations via LLM-assisted translation, which were
+validated using 222 top-level test cases.
+
+Each project in both Vivo-Bench [42] and C2R-Bench provides
+four artifacts: the original C source code, C test cases, the refer-
+ence Rust translation, and corresponding Rust test cases. Table 3
+summarizes the dataset statistics.
+
+ICSE-SEIP ’26, April 12–18, 2026, Rio de Janeiro, Brazil
+
+Wang et al.
+
+3.3 Evaluation Strategy and Metrics
+
+Our evaluation assesses C-to-Rust translation performance at two
+granularities: project-level and module-level, each employing a
+tailored strategy and specific metrics.
+
+Project-level Evaluation. We benchmark the translation of
+complete software projects under realistic conditions, where ref-
+erence implementations are unavailable. This strategy employs
+incremental compilation: we construct a skeleton with placeholder
+modules and iteratively replace them with translated code, revert-
+ing any modules that cause compilation failures. We employ three
+metrics to quantify project-level performance:
+
+• Incremental Compilation Pass Rate (ICompRate): The
+proportion of translated modules that compile successfully
+when integrated step-wise into the project skeleton, measur-
+ing syntactic correctness [39].
+
+• Line Acceptance Rate (AccRate) [54]: This metric evaluates
+the fidelity of the initial translation by comparing it to the
+manually corrected version. Precision captures the percentage
+of correct lines in the initial output, while Recall measures
+their preservation in the final code.
+
+• Code Safety Rate (SafeRate) [27]: The proportion of gen-
+erated Rust code that is memory-safe, i.e., free of unsafe
+functions or blocks.
+
+Module-level Evaluation. For a finer-grained analysis, we as-
+sess translation accuracy at the module level using a fill-in-the-
+blank strategy. Given a C module and its reference Rust implemen-
+tation, we remove the latter, translate the C module, and insert the
+result into the project to check compilation and test outcomes. Two
+metrics are used for this assessment:
+
+• Fill-in Compilation Pass Rate (FCompRate): The per-
+centage of generated modules that compile correctly upon
+integration.
+
+• Test Pass Rate (TestRate) [23]: The percentage of generated
+
+modules that pass all associated unit tests.
+
+3.4 Implementation Details
+
+We implement EvoC2Rust using DeepSeek-V3 [8] and Qwen3-
+32B [4] as the foundation models. Translation tasks use greedy
+decoding with max_tokens set to 4096. We leverage Tree-sitter
+v0.22.3 [3] for C code parsing, the standard rustc [2] for compi-
+lation, and the BGE-M3 model [32] to generate embeddings and
+retrieve the top-10 most relevant patterns based on cosine similar-
+ity. Iteration limits are enforced to ensure practicality: 5 rounds for
+bracket repair and 3 rounds for LLM refinement.
+
+We established verified ground-truth implementations to eval-
+uate the line acceptance rate metric. For each project, we first
+translated the code using the target methods. The resulting Rust ar-
+tifacts were then iteratively compiled and tested. Any compilation
+or test failures were manually repaired by three senior engineers
+with assistance from Claude Sonnet 4 [5] until all tests passed.
+
+4 Results and Analysis
+4.1 Main Results (RQ1)
+
+EvoC2Rust demonstrates superior performance in project-level
+C-to-Rust translation, as summarized in Table 4. It consistently
+
+outperforms all baseline methods across both datasets, achieving
+the highest overall performance in terms of compilation success,
+line acceptance, and code safety.
+
+EvoC2Rust demonstrates a significant advantage in generat-
+ing memory-safe Rust code compared to rule-based and hybrid
+baselines. Although C2Rust and C2SaferRust achieve near-perfect
+compilation pass rates (e.g., 100% on Vivo-Bench), their safety per-
+formance is considerably lower. C2Rust exhibits code safety rates of
+only 0% and 1.83% on the two datasets, while C2SaferRust, despite
+LLM-enhanced optimization, reaches merely 60% and 48.24%. This
+confirms that syntactic translation, even with LLM post-processing,
+fails to reliably meet Rust’s safety requirements. In contrast, our
+method proactively prevents unsafe code by leveraging safety-
+guaranteed feature mappings.
+
+Among LLM-based approaches, EvoC2Rust demonstrates con-
+sistent superiority. On Vivo-Bench, it surpasses all baselines by
+12.65% to 64.51% in compilation success and 7.57% to 46.30% in
+line acceptance using DeepSeek-V3, while maintaining a 98% code
+safety rate. The performance gap widens on the complex C2R-
+Bench, where it achieves 93.84% compilation success (21.82%-44.63%
+higher than baselines) and over 97% line acceptance. This trend
+is also observed with the Qwen3-32B model, highlighting the ef-
+fectiveness of our skeleton-guided, feature mapping-augmented
+translation paradigm.
+
+Specifically, EvoC2Rust improves compilation success by 44.63%
+and line acceptance by 54.38% over Self-Repair on C2R-Bench with
+DeepSeek-V3 (42.95%/55.66% with Qwen3-32B). Self-Repair’s file-
+level processing often exceeds LLM context limits, leading to code
+truncation. Compared to Tymcrat, EvoC2Rust achieves a 21.82%
+higher compilation rate on C2R-Bench with DeepSeek-V3 (11.79%
+with Qwen3-32B). While Tymcrat employs diverse signature gen-
+eration and context enrichment to reduce initial errors, its lack
+of expert-derived structured translation guidance ultimately con-
+strains its effectiveness in complex scenarios. Direct Prompting
+performs poorest, with a 38.42% average compilation success and
+low line acceptance (39.13% precision, 40.64% recall). This is pri-
+marily due to the inherent linguistic gaps between C and Rust.
+
+Answer to RQ1. EvoC2Rust surpasses all baseline meth-
+ods in project-level C-to-Rust translation, demonstrating the
+highest overall performance across compilation success, line
+acceptance, and code safety on both open-source and indus-
+trial benchmarks.
+
+4.2 Module Translation (RQ2)
+
+We further evaluate the module translation accuracy of EvoC2Rust,
+which serves as its core technical component. As shown in Table 5,
+EvoC2Rust exhibits strong performance at the module level. Using
+DeepSeek-V3, it achieves 100% compilation and 99.07% test pass
+rates on Vivo-Bench, while maintaining robust results on C2R-
+Bench (92.25% compilation, 89.53% test pass). Even with the smaller
+Qwen3-32B model which has 20× fewer parameters, EvoC2Rust
+still delivers competitive performance (80.63% compilation, 77.91%
+test pass), demonstrating its model-agnostic applicability.
+
+A notable observation is the strong correlation between test
+pass rates and compilation success: modules that compile correctly
+generally also pass functional tests. This consistency results from
+
+EvoC2Rust: A Skeleton-guided Framework for Project-Level C-to-Rust Translation
+
+ICSE-SEIP ’26, April 12–18, 2026, Rio de Janeiro, Brazil
+
+Table 4: Performance of Various Methods in Translating Complete C Projects to Rust
+
+Dataset
+
+Method
+
+ICompRate
+
+AccRate
+
+Precision
+
+Recall
+
+SafeRate
+
+Vivo-Bench
+
+C2R-Bench
+
+100
+100
+
+52.63
+81.76
+26.23
+87.65
+
+Rule-based and Hybrid Tools
+C2Rust [1]
+C2SaferRust [30]
+LLM-based Methods (DeepSeek-V3)
+84.21
+Self-Repair [23]
+87.35
+Tymcrat [19]
+35.49
+Direct Prompting
+100
+EvoC2Rust (Ours)
+LLM-based Methods (Qwen3-32B)
+Self-Repair [23]
+Tymcrat [19]
+Direct Prompting
+EvoC2Rust (Ours)
+Rule-based and Hybrid Tools
+C2Rust [1]
+C2SaferRust [30]
+LLM-based Methods (DeepSeek-V3)
+49.21
+Self-Repair [23]
+72.02
+Tymcrat [19]
+56.67
+Direct Prompting
+EvoC2Rust (Ours)
+93.84
+LLM-based Methods (Qwen3-32B)
+Self-Repair [23]
+Tymcrat [19]
+Direct Prompting
+EvoC2Rust (Ours)
+
+99.28
+99.28
+
+39.40
+70.56
+35.29
+82.35
+* Bold and underline denote the best and second-best results, respectively.
+
+100
+100
+
+92.08
+92.11
+55.15
+99.83
+
+33.12
+76.82
+21.72
+87.92
+
+98.99
+97.47
+
+72.35
+77.82
+55.65
+97.56
+
+45.38
+66.72
+24.01
+85.75
+
+100
+100
+
+89.24
+92.44
+51.95
+99.86
+
+38.36
+74.47
+27.51
+83.45
+
+98.98
+97.68
+
+13.79
+74.94
+52.70
+97.34
+
+10.65
+65.91
+30.41
+82.59
+
+0
+60.00
+
+87.60
+97.88
+77.09
+98.00
+
+77.57
+87.11
+89.81
+98.22
+
+1.83
+48.24
+
+83.92
+95.92
+82.43
+97.41
+
+87.15
+82.75
+93.63
+97.40
+
+our method’s dual mechanisms. Feature mapping prevents semantic
+errors, and compiler-guided repair maintains logically sound error
+correction.
+
+Our analysis confirms that project complexity significantly im-
+pacts translation quality. Complex projects with intricate control
+flows and data dependencies consistently challenge LLM compre-
+hension capabilities. For instance, the cmptlz project, featuring
+complex macros and dependencies, achieves test pass rates of 86.35%
+and 70.79% across models. In contrast, the simpler sha256 project
+attains optimal 100% pass rates.
+
+Answer to RQ2. Our method demonstrates robust perfor-
+mance in module-level translation, achieving 92.25%–100%
+compilation success and 77.91%–99.07% test pass rates across
+model scales, confirming its effectiveness in handling projects
+of varying complexity.
+
+4.3 Ablation Study (RQ3)
+
+To assess the contribution of each component in EvoC2Rust and
+validate our design choices, we perform an ablation study by incre-
+mentally removing its key components: feature mapping, bracket
+
+repair, rule-based repair, and LLM refinement. Each variant is eval-
+uated on C2R-Bench benchmark using the DeepSeek-V3 model. In
+our cascaded repair chain, later repairs depend on the output of ear-
+lier steps. Removing an early component while keeping later ones
+would thus propagate unresolved errors, preventing compilation or
+testing and invalidating the assessment of downstream components.
+To avoid this issue and ensure a meaningful evaluation, we remove
+components in reverse order, beginning with the final step (LLM
+refinement).
+
+As illustrated in Table 6, every component in EvoC2Rust con-
+tributes critically to its overall effectiveness. Among them, the
+feature mapping mechanism is the most impactful component. By
+ablating this mechanism, both ICompRate and FCompRate drop
+sharply from 74.29% to 56.67% and from 81.06% to 33%, respec-
+tively. The impact on semantic correctness is also substantial, with
+TestRate decreasing from 79.91% to 30.27%. This result highlights
+the mechanism’s essential role in bridging C and Rust constructs
+through predefined transformation patterns that map C idioms to
+safe Rust equivalents where direct counterparts are absent.
+
+The cascading repair chain also facilitates C-to-Rust translation.
+Removing all three repairs (-w/o repair#1-3) results in considerable
+performance degradation, with ICompRate dropping by 19.55%,
+FCompRate by 11.19%, and TestRate by 9.62%. Within this chain,
+
+ICSE-SEIP ’26, April 12–18, 2026, Rio de Janeiro, Brazil
+
+Wang et al.
+
+Table 5: Effectiveness of EvoC2Rust in Module-Level C-to-
+Rust Translation
+
+Dataset
+
+Project
+
+FCompRate
+
+TestRate
+
+DeepSeek-V3
+
+Vivo-Bench
+
+C2R-Bench
+
+Vivo-Bench
+
+C2R-Bench
+
+19 projects
+avl
+bzp
+md5
+sha256
+rapidlz
+cmptlz
+Subtotal
+
+99.07
+100.00
+95.21
+96.55
+100.00
+96.05
+86.98
+92.25
+
+Qwen3-32B
+
+19 projects
+avl
+bzp
+md5
+sha256
+rapidlz
+cmptlz
+Subtotal
+
+87.65
+97.01
+89.36
+89.66
+90.91
+78.95
+70.79
+80.63
+
+98.50
+92.53
+92.55
+86.21
+100.00
+92.11
+86.35
+89.53
+
+84.57
+82.09
+88.83
+89.21
+90.91
+77.63
+68.89
+77.91
+
+rule-based repair (repair#2) contributes most significantly, raising
+the compilation pass rate by 9.68% and the test pass rate by 4.45%
+on average. LLM refinement (repair#3) further enhances syntactic
+correctness by 4.27% and semantic correctness by 8.98%, without
+compromising code safety.
+
+Code safety remains consistently high (around 97%) across nearly
+all ablation settings. This stability is attributable to the feature map-
+ping mechanism’s encapsulation of low-level operations within
+verified safe constructs. Only when both feature mapping and re-
+pairs are disabled does safety drop sharply to 82.43%, demonstrating
+the necessity of our integrated design.
+
+Answer to RQ3. Each component in EvoC2Rust plays a
+crucial role in its overall performance. The feature mapping
+mechanism provides a safe and reliable basis by bridging
+C-to-Rust semantic gaps, while the cascading repair chain
+fixes remaining errors to maximize syntactic and semantic
+correctness.
+
+4.4 Scalability on Larger Projects (RQ4)
+
+To evaluate the scalability and performance of our method on large-
+scale codebases, we conduct experiments on 10 larger projects (9,973
+- 91,588 LoC) from RepoTransBench [44], a benchmark derived from
+highly-starred GitHub repositories. During module translation, we
+exclude functions that depend on third-party libraries, as our cur-
+rent implementation primarily supports dependencies on the ISO
+C standard library. Using DeepSeek-V3 as the backbone model,
+EvoC2Rust achieves acceptable performance, with an ICompRate
+of 75.61% and a SafeRate of 96.20%. We do not report line acceptance
+rates due to the prohibitive cost of manually creating verified Rust
+references for projects at this scale.
+
+By integrating results from all evaluated datasets (i.e., Vivo-
+Bench, C2R-Bench, and RepoTransBench), we further analyze trans-
+lation performance across different project scales.
+
+Translation Accuracy vs. Project Scale. As shown in Figure 2,
+compilation success (ICompRate) exhibits a clear negative corre-
+lation with project size. While the rate declines gradually from
+100% for small projects (≤500 LoC) to approximately 69% for large
+projects (>10,000 LoC), it does not collapse. This robustness to
+scaling is due to our skeleton-guided approach, which effectively
+manages complex inter-module dependencies.
+
+Translation Safety vs. Project Scale. The SafeRate remains
+consistently high (around 97%) across all project sizes, and even
+exhibits a slight improvement in larger projects. We attribute this
+stability to our safety-guaranteed feature mappings, which encap-
+sulate low-level operations into a relatively fixed set of unsafe code
+blocks. As project size increases, the proportion of such unsafe
+code naturally decreases, resulting in the observed improvement in
+SafeRate.
+
+Translation Efficiency vs. Project Scale. Figure 3 presents
+the translation efficiency, quantified as seconds per line of code
+(Sec/LoC), across projects of varying scales. The per-line translation
+time ranges from approximately 0.35 to 0.85 seconds, averaging
+0.63 seconds. Notably, for projects exceeding 5,000 LoC, efficiency
+stabilizes at approximately 0.55 Sec/LoC, demonstrating strong
+scalability of our method. These performance fluctuations show
+no correlation with code length and are instead determined by
+project-specific characteristics. The primary factor influencing this
+variation is the number of LLM refinement iterations required,
+which depends directly on the inherent complexity of the code in
+each project.
+
+Answer to RQ4. Our method exhibits strong scalability
+on large-scale projects, maintaining resilient compilation
+rates, high safety guarantees, and stable efficiency without
+performance collapse.
+
+4.5 Case Study
+
+We present a case study on the rb_tree_rotate function, a core
+operation in a red-black tree implementation, to illustrate the effec-
+tiveness of EvoC2Rust (Figure 4). This function involves intricate
+pointer manipulation, characteristic of low-level C code that is dif-
+ficult to translate into safe, idiomatic Rust. Its complexity exposes
+common limitations of existing translation approaches.
+
+As shown in Figure 4, baseline methods exhibit critical failures.
+Direct Prompting produces a project-level interface mismatch by
+passing a raw pointer (*mut) where a mutable reference (&mut)
+is required, revealing a lack of project-wide context awareness.
+Moreover, its heavy use of raw pointers necessitates unsafe blocks,
+contradicting Rust’s memory safety goals. Self-Repair attempts a
+more idiomatic translation using Box<T>, but introduces a function-
+level ownership error (use of moved value), demonstrating the
+difficulty of refactoring C-style memory management into safe Rust
+idioms without safety-guaranteed feature mappings.
+
+In contrast, EvoC2Rust generates a correct and safe translation.
+This is achieved through our feature mapping mechanism, which
+employs a unified Ptr<T> smart pointer to preserve C-like pointer
+
+EvoC2Rust: A Skeleton-guided Framework for Project-Level C-to-Rust Translation
+
+ICSE-SEIP ’26, April 12–18, 2026, Rio de Janeiro, Brazil
+
+Table 6: Ablation Results on Key Components of EvoC2Rust
+
+Variant
+
+Project Translation
+
+Module Translation
+
+ICompRate
+
+SafeRate
+
+FCompRate
+
+TestRate
+
+EvoC2Rust (Ours)
+-w/o Repair#3
+-w/o Repair#2-3
+-w/o Repair#1-3
+-w/o Feature Mapping and Repair#1-3
+
+93.84
+89.57 ( -4.27)
+75.24 (-18.60)
+74.29 (-19.55)
+56.67 (-37.17)
+
+97.41
+97.40 ( -0.01)
+97.46 ( +0.05)
+97.21 ( -0.20)
+82.43 (-14.98)
+
+92.25
+87.23 ( -5.02)
+82.21 (-10.04)
+81.06 (-11.19)
+33.00 (-59.25)
+
+89.53
+85.37 ( -4.16)
+80.92 ( -8.61)
+79.91 ( -9.62)
+30.27 (-59.26)
+
+* Repair#1: bracket repair; Repair#2: rule-based repair; Repair#3: LLM refinement.
+
+support multiple language pairs, the current implementation specif-
+ically targets C-to-Rust translation. Moreover, due to resource con-
+straints, our evaluation is limited to DeepSeek-V3 and Qwen3-32B.
+These choices do not, however, affect the validity of our framework
+evaluation, as the primary contribution lies in the architecture it-
+self rather than in model comparison. Extending the evaluation
+to include additional languages and models remains an important
+direction for future work. 2) Data leakage: Our method uses LLMs
+to translate C code to Rust. Since these models may have been pre-
+trained on public benchmarks, we mitigate this risk by including six
+industrial projects alongside open-source datasets in our evaluation.
+3) Dataset characteristics: The current benchmarks are limited to
+single-threaded, user-level C projects with ISO C standard library
+dependencies. Future work should consider more complex settings
+such as multithreading, third-party libraries, and kernel-level code.
+
+6 Related Work
+6.1 C-to-Rust Translation
+
+Existing work for automatic C-to-Rust translation falls into three
+broad categories: rule-based, LLM-based, and hybrid techniques.
+
+Rule-based Methods rely on manually designed rules to trans-
+form C code into Rust. The C2Rust transpiler [1] exemplifies this
+approach by using Clang’s AST to generate Rust code, though the
+output relies heavily on unsafe blocks. Subsequent work has aimed
+to improve safety and idiomaticity: Emre et al. [10, 11] used com-
+piler feedback for pointer safety; Zhang et al. [51] applied static
+ownership analysis; Ling et al. [27] and Hong et al. [15–18] focused
+on API safety and specific constructs; Larson et al. [24] proposed
+pointer derivation graphs to translate unsafe Rust to safer Rust;
+Wu et al. [46] retyped polymorphic C void pointers into uses of
+Rust generics. While effective, these methods require significant
+manual effort and often produce Rust code that is both unsafe and
+non-idiomatic.
+
+LLM-based Methods leverage LLMs to generate idiomatic Rust
+code without relying on manually defined rules. Eniser et al. [12]
+introduced FLOURINE, which uses fuzz testing to validate semantic
+equivalence between C and Rust code. Yang et al. [48] adapted
+MSWasm-based testing for multi-language translation to Rust. Luo
+et al. [29] proposed IRENE, an LLM-based framework that inte-
+grates rule-augmented retrieval and structured summarization for
+function-level translation. Nitin et al. [31] enhanced LLM transla-
+tion by integrating static specifications and I/O tests. Xu et al. [47]
+optimized type migration by leveraging data flow graphs. Farrukh
+
+Figure 2: Translation performance at different project scales.
+
+Figure 3: Translation time at different project scales.
+
+semantics while ensuring project-wide type consistency. Combined
+with a flexible .cast() method for type conversions, this approach
+resolves both the interface mismatch and ownership issues that
+cause other methods to fail. By abstracting low-level C operations
+into a safe Rust layer, EvoC2Rust succeeds where other techniques
+fall short.
+
+5 Limitations and Threats to Validity
+
+We have identified the following limitations and potential threats
+to the validity of our method:
+
+Internal Validity. The main internal threat comes from correct-
+ness verification, which currently relies on predefined test cases.
+Adopting more robust validation techniques like fuzzing [21] and
+self-debugging [22, 38] could enhance test coverage and uncover
+subtle semantic errors. For line acceptance rate measurement, we
+use Claude-generated outputs verified by human experts as ground
+truth. While this manual validation ensures correctness beyond
+automated testing, it may not scale to larger datasets. Future work
+should explore semi-automated verification to balance accuracy
+and efficiency.
+
+External Validity. Three primary threats affect external valid-
+ity: 1) Generalizability: While our translation pipeline is designed to
+
+500501-10001001-50005001-10000>10000Code Length (LoC)60708090100ICompRate (%)ICompRateSafeRate96979899100SafeRate (%)500501-10001001-50005001-10000>10000Code Length (LoC)0.00.20.40.60.81.0Sec / LoC0.00.20.40.60.81.0PlaceholderICSE-SEIP ’26, April 12–18, 2026, Rio de Janeiro, Brazil
+
+Wang et al.
+
+Figure 4: A case study on translating the rb_tree_rotate function.
+
+et al. [13] developed a multi-agent framework featuring iterative er-
+ror correction. However, LLM-based translation suffers from lower
+accuracy due to the lack of parallel C-Rust training data [34].
+
+Hybrid Methods seek to combine the strengths of both paradigms.
+
+For instance, C2SaferRust [30] and PR2 [14] employ LLMs to refine
+rule-based translations, improving safety and idiomaticity while
+preserving functional equivalence through testing. SACTOR [52]
+delegates different tasks to each paradigm, applying C2Rust for data
+types and an LLM for global variables and functions. Our method
+extends this direction with a two-stage framework: it first uses lin-
+guistic feature mappings (i.e., transformation rules) to guide LLM
+translation, then applies a compilation-driven repair mechanism
+combining LLM refinement with static analysis. It achieves an effec-
+tive balance between translation accuracy and safety in automated
+C-to-Rust migration.
+
+6.2 Project-level Code Translation with LLMs
+
+While most C-to-Rust translation methods target small code units,
+recent work explores LLM-based project-level translation. These ap-
+proaches typically decompose a C project into dependency-ordered
+units, translate them sequentially, and reassemble the results.
+
+Shiraishi et al. [39] pioneered this direction by using project
+metadata to maintain consistency, though their method prioritizes
+compilation success over functional correctness. Syzygy [37] and
+RustMap [6] employ a strategy of translating both functions and
+test cases while utilizing feedback mechanisms for repair. Neverthe-
+less, these approaches necessitate complete dependency contexts
+(occasionally through manual intervention) and exhibit limited scal-
+ability when applied to complex industrial codebases. Khatry et
+al. [23] and Ou et al. [34] introduced repository-scale benchmarks
+
+and self-repair techniques, yet rely on annotated Rust interfaces
+rarely available in practice. Hong et al. [19] addressed this with
+Tymcrat, a type inference-based method for automating signature
+translation.
+
+Differing from existing approaches that translate modules se-
+quentially following dependency order and require full project con-
+texts, EvoC2Rust introduces a skeleton-guided strategy, which first
+constructs a compilable Rust skeleton and then executes incremen-
+tal function translation. Beyond enabling concurrent processing,
+this design also enhances correctness by isolating the LLM from
+cross-module dependencies.
+
+7 Conclusion
+
+We present EvoC2Rust, a novel LLM-powered framework for au-
+tomated translation of complete C projects to Rust. By leveraging
+feature mapping-enhanced LLMs, EvoC2Rust performs skeleton-
+guided code translation, augmented with hybrid error correction
+that combines LLM capabilities with static analysis. Extensive evalu-
+ation on both open-source and industrial benchmarks demonstrates
+that EvoC2Rust consistently achieves superior overall performance
+in syntax accuracy, semantic equivalence, and memory safety. Fu-
+ture work will extend the approach to more complex settings, in-
+cluding multithreading, third-party libraries, and kernel-level code
+across diverse application domains.
+
+Acknowledgments
+
+This research is funded by the National Key Research and Develop-
+ment Program of China (Grant No. 2023YFB4503802), the National
+Natural Science Foundation of China (Grant No. 62232003), and the
+Natural Science Foundation of Shanghai (Grant No. 25ZR1401175).
+
+staticRBTreeNode*rb_tree_rotate(RBTree*tree, RBTreeNode*node, RBTreeNodeSidedirection){RBTreeNode*new_root;/* The child of this node will take its place:for a left rotation, it is the right child,and vice versa. */new_root= node->children[1-direction];/* Make new_rootthe root, update parent pointers. */rb_tree_node_replace(tree, node, new_root);/* Rearrange pointers */node->children[1-direction] = new_root->children[direction];new_root->children[direction] = node;/* Update parent references */node->parent = new_root;if(node->children[1-direction] != NULL) {node->children[1-direction]->parent = node;}returnnew_root;}fnrb_tree_node_replace(tree: &mutRBTree, node1: &mutRBTreeNode, node2: Option<&mutRBTreeNode>) {//...}fnrb_tree_rotate(tree: &mutRBTree, node: *mutRBTreeNode, direction: RBTreeNodeSide) -> *mutRBTreeNode {letnew_root = unsafe{ (*node).children[1-direction asusize] };rb_tree_node_replace(tree, node, new_root);//interfacemismatchunsafe{//unsafecode(*node).children[1-direction asusize] = (*new_root).children[direction asusize];(*new_root).children[direction asusize] = node;(*node).parent = new_root;if!(*node).children[1-direction asusize].is_null() {(*(*node).children[1-direction asusize]).parent = node;}}new_root}implRBTree{fnrotate(&mutself, node: &mutRBTreeNode, direction: RBTreeNodeSide) -> Option<Box<RBTreeNode>> {letopposite = matchdirection {RBTreeNodeSide::Left => RBTreeNodeSide::Right,RBTreeNodeSide::Right => RBTreeNodeSide::Left,};ifletSome(mutnew_root) = node.children[opposite asusize].take() {self.node_replace(node,Some(new_root.clone()));node.children[opposite asusize] =new_root.children[direction asusize].take();ifletSome(refmutchild) = node.children[opposite asusize] {child.parent=Some(Box::new((*node).clone()));}new_root.children[direction asusize] = Some(Box::new((*node).clone()));node.parent= Some(new_root); // move occurs hereSome(new_root) // value used after move//OwnershipPitfall} else{None}}}pubfnrb_tree_rotate(muttree: Ptr<RBTree>, mutnode: Ptr<RBTreeNode>, mutdirection: RBTreeNodeSide) -> Ptr<RBTreeNode> {letmutnew_root: Ptr<RBTreeNode>;new_root= node.children[1-direction].cast();rb_tree_node_replace(tree.cast(), node.cast(), new_root.cast());// cast() ensuresinterfaceconsistencynode.children[1-direction] = new_root.children[direction].cast();new_root.children[direction] = node.cast();node.parent= new_root.cast();if(node.children[1-direction] != NULL!()).as_bool() {node.children[1-direction].parent = node.cast();}returnnew_root.cast();//safecode}Direct PromptingSelf-RepairEvoC2RustOriginalCCodeEvoC2Rust: A Skeleton-guided Framework for Project-Level C-to-Rust Translation
+
+ICSE-SEIP ’26, April 12–18, 2026, Rio de Janeiro, Brazil
+
+References
+[1] 2025. C2Rust: Migrate C code to Rust. https://github.com/immunant/c2rust.
+[2] 2025. The Rust Compiler (rustc). https://doc.rust-lang.org/rustc/.
+[3] 2025. Tree-Sitter: An incremental parsing system for programming tools. https:
+
+//tree-sitter.github.io/tree-sitter.
+
+[4] Alibaba. 2025. Qwen3-32B Model. https://huggingface.co/Qwen/Qwen3-32B.
+[5] Anthropic. 2024. Claude 4 Technical Report. https://www.anthropic.com/index/
+
+claude-4.
+
+[6] Xuemeng Cai, Jiakun Liu, Xiping Huang, Yijun Yu, Haitao Wu, Chunmiao Li, Bo
+Wang, Imam Nur Bani Yusuf, and Lingxiao Jiang. 2025. RustMap: Towards Project-
+Scale C-to-Rust Migration via Program Analysis and LLM. CoRR abs/2503.17741
+(2025).
+
+[7] DARPA-SN-24-89. 2024. Translating All C TO Rust (TRACTOR). https://www.
+
+darpa.mil/program/translating-all-c-to-rust.
+
+[8] DeepSeek-AI. 2025. DeepSeek-V3 Model. https://api.deepseek.com.
+[9] Saman Dehghan, Tianran Sun, Tianxiang Wu, Zihan Li, and Reyhaneh Jabbarvand.
+2025. Translating Large-Scale C Repositories to Idiomatic Rust. arXiv preprint
+arXiv:2511.20617 (2025).
+
+[10] Mehmet Emre, Peter Boyland, Aesha Parekh, Ryan Schroeder, Kyle Dewey, and
+Ben Hardekopf. 2023. Aliasing Limits on Translating C to Safe Rust. Proc. ACM
+Program. Lang. 7, OOPSLA1 (2023), 551–579.
+
+[11] Mehmet Emre, Ryan Schroeder, Kyle Dewey, and Ben Hardekopf. 2021. Translat-
+
+ing C to safer Rust. Proc. ACM Program. Lang. 5, OOPSLA (2021), 1–29.
+
+[12] Hasan Ferit Eniser, Hanliang Zhang, Cristina David, Meng Wang, Maria Chris-
+takis, Brandon Paulsen, Joey Dodds, and Daniel Kroening. 2024. Towards Trans-
+lating Real-World Code with LLMs: A Study of Translating to Rust. CoRR
+abs/2405.11514 (2024).
+
+[13] Muhammad Farrukh, Smeet Shah, Baris Coskun, and Michalis Polychronakis.
+2025. SafeTrans: LLM-assisted Transpilation from C to Rust. CoRR abs/2505.10708
+(2025).
+
+[14] Yifei Gao, Chengpeng Wang, Pengxiang Huang, Xuwei Liu, Mingwei Zheng,
+and Xiangyu Zhang. 2025. PR2: Peephole Raw Pointer Rewriting with LLMs for
+Translating C to Safer Rust. CoRR abs/2505.04852 (2025).
+
+[15] Jaemin Hong and Sukyoung Ryu. 2023. Concrat: An Automatic C-to-Rust Lock
+API Translator for Concurrent Programs. In 45th IEEE/ACM International Confer-
+ence on Software Engineering, ICSE 2023, Melbourne, Australia, May 14-20, 2023.
+IEEE, 716–728.
+
+[16] Jaemin Hong and Sukyoung Ryu. 2024. Don’t Write, but Return: Replacing
+Output Parameters with Algebraic Data Types in C-to-Rust Translation. Proc.
+ACM Program. Lang. 8, PLDI (2024), 716–740.
+
+[17] Jaemin Hong and Sukyoung Ryu. 2024. To Tag, or Not to Tag: Translating C’s
+Unions to Rust’s Tagged Unions. In Proceedings of the 39th IEEE/ACM International
+Conference on Automated Software Engineering, ASE 2024, Sacramento, CA, USA,
+October 27 - November 1, 2024. ACM, 40–52.
+
+[18] Jaemin Hong and Sukyoung Ryu. 2025. Forcrat: Automatic I/O API Translation
+from C to Rust via Origin and Capability Analysis. CoRR abs/2506.01427 (2025).
+[19] Jaemin Hong and Sukyoung Ryu. 2025. Type-migrating C-to-Rust translation
+
+using a large language model. Empir. Softw. Eng. 30, 1 (2025), 3.
+
+[20] Mingsheng Jiao, Tingrui Yu, Xuan Li, Guanjie Qiu, Xiaodong Gu, and Beijun Shen.
+2023. On the Evaluation of Neural Code Translation: Taxonomy and Benchmark.
+In 38th IEEE/ACM International Conference on Automated Software Engineering,
+ASE 2023, Luxembourg, September 11-15, 2023. IEEE, 1529–1541.
+
+[21] Ismet Burak Kadron, Yannic Noller, Rohan Padhye, Tevfik Bultan, Corina S.
+Pasareanu, and Koushik Sen. 2024. Fuzzing, Symbolic Execution, and Expert
+Guidance for Better Testing. IEEE Softw. 41, 1 (2024), 98–104.
+
+[22] Sungmin Kang, Bei Chen, Shin Yoo, and Jian-Guang Lou. 2025. Explainable
+automated debugging via large language model-driven scientific debugging.
+Empir. Softw. Eng. 30, 2 (2025), 45.
+
+[23] Anirudh Khatry, Robert Zhang, Jia Pan, Ziteng Wang, Qiaochu Chen, Greg
+Durrett, and Isil Dillig. 2025. CRUST-Bench: A Comprehensive Benchmark for
+C-to-safe-Rust Transpilation. CoRR abs/2504.15254 (2025).
+
+[24] Per Larsen. 2024. Migrating C to Rust for Memory Safety. IEEE Secur. Priv. 22, 4
+
+(2024), 22–29.
+
+[25] Ruishi Li, Bo Wang, Tianyu Li, Prateek Saxena, and Ashish Kundu. 2025. Translat-
+ing C to Rust: Lessons from a User Study. In 32nd Annual Network and Distributed
+System Security Symposium, NDSS 2025, San Diego, California, USA, February
+24-28, 2025. The Internet Society.
+
+[26] Xuan Li, Shuai Yuan, Xiaodong Gu, Yuting Chen, and Beijun Shen. 2024. Few-
+shot code translation via task-adapted prompt learning. J. Syst. Softw. 212 (2024),
+112002.
+
+[27] Michael Ling, Yijun Yu, Haitao Wu, Yuan Wang, James R. Cordy, and Ahmed E.
+Hassan. 2022. In Rust We Trust - A Transpiler from Unsafe C to Safer Rust. In
+44th IEEE/ACM International Conference on Software Engineering: Companion Pro-
+ceedings, ICSE Companion 2022, Pittsburgh, PA, USA, May 22-24, 2022. ACM/IEEE,
+354–355.
+
+[28] Bob Lord. 2023. The Urgent Need for Memory Safety in Software Prod-
+ucts. https://www.cisa.gov/news-events/news/urgent-need-memory-safety-
+software-products.
+
+[29] Feng Luo, Kexing Ji, Cuiyun Gao, Shuzheng Gao, Jia Feng, Kui Liu, Xin Xia, and
+Michael R Lyu. 2025. Integrating Rules and Semantics for LLM-Based C-to-Rust
+Translation. In 2025 IEEE International Conference on Software Maintenance and
+Evolution (ICSME). IEEE.
+
+[30] Vikram Nitin, Rahul Krishna, Luiz Lemos do Valle, and Baishakhi Ray. 2025.
+C2SaferRust: Transforming C Projects into Safer Rust with NeuroSymbolic Tech-
+niques. CoRR abs/2501.14257 (2025).
+
+[31] Vikram Nitin and Baishakhi Ray. 2024. SpecTra: Enhancing the Code Translation
+Ability of Language Models by Generating Multi-Modal Specifications. CoRR
+abs/2405.18574 (2024).
+
+[32] Beijing Academy of Artificial Intelligence. 2025. M3-Embedding: Multi-
+Linguality, Multi-Functionality, Multi-Granularity Text Embeddings Through
+Self-Knowledge Distillation. https://huggingface.co/BAAI/bge-m3.
+
+[33] Office of the National Cyber Director. 2024. Back to the building blocks: A
+path toward secure and measurable software. https://www.whitehouse.gov/wp-
+content/uploads/2024/02/Final-ONCD-Technical-Report.pdf.
+
+[34] Guangsheng Ou, Mingwei Liu, Yuxuan Chen, Xin Peng, and Zibin Zheng.
+2024. Repository-level Code Translation Benchmark Targeting Rust. CoRR
+abs/2411.13990 (2024).
+
+[35] Rangeet Pan, Ali Reza Ibrahimzada, Rahul Krishna, Divya Sankar, Lam-
+bert Pouguem Wassi, Michele Merler, Boris Sobolev, Raju Pavuluri, Saurabh
+Sinha, and Reyhaneh Jabbarvand. 2024. Lost in Translation: A Study of Bugs
+Introduced by Large Language Models while Translating Code. In Proceedings of
+the 46th IEEE/ACM International Conference on Software Engineering, ICSE 2024,
+Lisbon, Portugal, April 14-20, 2024. ACM, 82:1–82:13.
+
+[36] Baptiste Rozière, Marie-Anne Lachaux, Lowik Chanussot, and Guillaume Lample.
+2020. Unsupervised Translation of Programming Languages. In Advances in Neu-
+ral Information Processing Systems 33: Annual Conference on Neural Information
+Processing Systems 2020, NeurIPS 2020, December 6-12, 2020, virtual.
+
+[37] Manish Shetty, Naman Jain, Adwait Godbole, Sanjit A. Seshia, and Koushik Sen.
+2024. Syzygy: Dual Code-Test C to (safe) Rust Translation using LLMs and
+Dynamic Analysis. CoRR abs/2412.14234 (2024).
+
+[38] Yuling Shi, Songsong Wang, Chengcheng Wan, and Xiaodong Gu. 2024. From
+code to correctness: Closing the last mile of code generation with hierarchical
+debugging. arXiv preprint arXiv:2410.01215 (2024).
+
+[39] Momoko Shiraishi and Takahiro Shinagawa. 2024. Context-aware Code Seg-
+mentation for C-to-Rust Translation using Large Language Models. CoRR
+abs/2409.10506 (2024).
+
+[40] HoHyun Sim, Hyeonjoong Cho, Yeonghyeon Go, Zhoulai Fu, Ali Shokri, and
+Binoy Ravindran. 2025. Large Language Model-Powered Agent for C to Rust
+Code Translation. CoRR abs/2505.15858 (2025).
+
+[41] Qingxiao Tao, Tingrui Yu, Xiaodong Gu, and Beijun Shen. 2024. Unraveling the
+Potential of Large Language Models in Code Translation: How Far are We?. In
+31st Asia-Pacific Software Engineering Conference, APSEC 2024, Chongqing, China,
+December 3-6, 2024. IEEE, 353–362.
+
+[42] Vivo. 2025.
+
+Innovation Competition.
+https://atomgit.com/vivoblueos2/vivo_blueos_contest2_c2rust/tree/master/01-
+BlueOS2_Translation/Input/01-Primary.
+
+Benchmark for Vivo C-to-Rust
+
+[43] Chaofan Wang, Guanjie Qiu, Xiaodong Gu, and Beijun Shen. 2025. ApiRAT:
+Integrating Multi-source API Knowledge for Enhanced Code Translation with
+LLMs. In 49th IEEE Annual Computers, Software, and Applications Conference,
+COMPSAC 2025, Toronto, ON, Canada, July 8-11, 2025. IEEE, 1400–1405.
+
+[44] Yanli Wang, Yanlin Wang, Suiquan Wang, Daya Guo, Jiachi Chen, John C. Grundy,
+Xilin Liu, Yuchi Ma, Mingzhi Mao, Hongyu Zhang, and Zibin Zheng. 2024. Repo-
+TransBench: A Real-World Benchmark for Repository-Level Code Translation.
+CoRR abs/2412.17744 (2024).
+
+[45] Alex Williams. 2024. Improving Memory Management, Performance with Rust:
+Why Rust is becoming the programming language of choice for many high-level
+developers. Commun. ACM 67, 9 (2024), 8–9.
+
+[46] Xiafa Wu and Brian Demsky. 2025. GenC2Rust: Towards Generating Generic Rust
+Code from C. In 47th IEEE/ACM International Conference on Software Engineering,
+ICSE 2025, Ottawa, ON, Canada, April 26 - May 6, 2025. IEEE, 90–102.
+
+[47] Qingxiao Xu and Jeff Huang. 2025. Optimizing Type Migration for LLM-Based
+C-to-Rust Translation: A Data Flow Graph Approach. In Proceedings of the 14th
+ACM SIGPLAN International Workshop on the State Of the Art in Program Analysis,
+SOAP 2025, Seoul, Republic of Korea, 16 June 2025. ACM, 8–14.
+
+[48] Aidan Z. H. Yang, Yoshiki Takashima, Brandon Paulsen, Josiah Dodds, and Daniel
+Kroening. 2024. VERT: Verified Equivalent Rust Transpilation with Few-Shot
+Learning. CoRR abs/2404.18852 (2024).
+
+[49] Zhen Yang, Fang Liu, Zhongxing Yu, Jacky Wai Keung, Jia Li, Shuo Liu, Yifan
+Hong, Xiaoxue Ma, Zhi Jin, and Ge Li. 2024. Exploring and Unleashing the Power
+of Large Language Models in Automated Code Translation. Proc. ACM Softw.
+Eng. 1, FSE (2024), 1585–1608.
+
+[50] Shangbo Yun, Shuhuai Lin, Xiaodong Gu, and Beijun Shen. 2024. Project-specific
+code summarization with in-context learning. J. Syst. Softw. 216 (2024), 112149.
+[51] Hanliang Zhang, Cristina David, Yijun Yu, and Meng Wang. 2023. Ownership
+Guided C to Rust Translation. In Computer Aided Verification - 35th International
+Conference, CAV 2023, Paris, France, July 17-22, 2023, Proceedings, Part III (Lecture
+
+ICSE-SEIP ’26, April 12–18, 2026, Rio de Janeiro, Brazil
+
+Wang et al.
+
+Notes in Computer Science, Vol. 13966). Springer, 459–482.
+
+Artificial Intelligence. AAAI Press, 11783–11790.
+
+[52] Tianyang Zhou, Haowen Lin, Somesh Jha, Mihai Christodorescu, Kirill Levchenko,
+and Varun Chandrasekaran. 2025. LLM-Driven Multi-step Translation from C to
+Rust using Static Analysis. CoRR abs/2503.12511 (2025).
+
+[53] Ming Zhu, Karthik Suresh, and Chandan K. Reddy. 2022. Multilingual Code
+Snippets Training for Program Translation. In Thirty-Sixth AAAI Conference on
+
+[54] Albert Ziegler, Eirini Kalliamvakou, X. Alice Li, Andrew Rice, Devon Rifkin,
+Shawn Simister, Ganesh Sittampalam, and Edward Aftandilian. 2022. Productivity
+assessment of neural code completion. In MAPS@PLDI 2022: 6th ACM SIGPLAN
+International Symposium on Machine Programming, San Diego, CA, USA, 13 June
+2022. ACM, 21–29.
+
+
