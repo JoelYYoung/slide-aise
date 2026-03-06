@@ -1,0 +1,2164 @@
+3
+2
+0
+2
+
+r
+a
+
+M
+8
+1
+
+]
+L
+P
+.
+s
+c
+[
+
+1
+v
+5
+1
+5
+0
+1
+.
+3
+0
+3
+2
+:
+v
+i
+X
+r
+a
+
+Ownership guided C to Rust translation
+
+Hanliang Zhang1, Cristina David1, Yijun Yu2, and Meng Wang1
+
+1 University of Bristol
+{pd21541,cristina.david,meng.wang}@bristol.ac.uk
+2 The Open University
+yijun.yu@open.ac.uk
+
+Abstract. Dubbed a safer C, Rust is a modern programming language
+that combines memory safety and low-level control. This interesting com-
+bination has made Rust very popular among developers and there is a
+growing trend of migrating legacy codebases (very often in C) to Rust. In
+this paper, we present a C to Rust translation approach centred around
+static ownership analysis. We design a suite of analyses that infer own-
+ership models of C pointers and automatically translate the pointers
+into safe Rust equivalents. The resulting tool, Crown, scales to real-
+world codebases (half a million lines of code in less than 10 seconds) and
+achieves a high conversion rate.
+
+1
+
+Introduction
+
+Rust [28] is a modern programming language which features an exciting combina-
+tion of memory safety and low-level control. In particular, Rust takes inspiration
+from ownership and substructural (mostly aﬃne and linear) types and restricts
+certain memory accesses to their owners. This means that although multiple
+pointers to the resource can co-exist (through a mechanism known as borrow-
+ing), certain operations can only be performed by the owner. The Rust compiler
+is able to statically verify the ownership constraints and consequently guarantee
+memory and thread safety. This distinctive advantage of provable safety makes
+Rust a very popular language, and the prospect of migrating legacy codebases
+in C to Rust is very appealing.
+
+In response to this demand, automated tools translating C code to Rust
+emerge from both industry and academia [14, 21, 26]. Among them, the indus-
+trial strength translator C2Rust [21] rewrites C code into the Rust syntax while
+preserving the original semantics. The translation does not synthesise an own-
+ership model and thus is not able to do more than replicating the unsafe use
+of pointers in C. And consequently, the Rust code must be labelled with the
+unsafe keyword which allows certain actions that are not checked by the com-
+piler. More recent work focuses on reducing this unsafe labelling. In particular,
+the tool Laertes [14] aims to rewrite the (unsafe) code produced by C2Rust by
+searching the solution space guided by the type error messages from the Rust
+compiler. This is ground breaking, as for the ﬁrst time proper Rust code beyond
+a line-by-line direct conversion from the original C source may be synthesised.
+
+ 
+ 
+ 
+ 
+ 
+ 
+2
+
+Hanliang Zhang, Cristina David, Yijun Yu, and Meng Wang
+
+On the other hand, the limit of the trial-and-error approach is also clear: the
+system does not support the reasoning of the generation process, nor create
+any new understanding of the target code (other than the obvious fact that it
+compiles successfully).
+
+In this paper, we take a more principled approach by developing a novel own-
+ership analysis of pointers that is eﬃcient (scaling to large programs (half a mil-
+lion LOC in less than 10 seconds)), sophisticated (handling nested pointers and
+inductively-deﬁned data structures), and precise (being ﬁeld and ﬂow sensitive).
+Our ownership analysis is both scalable and precise owing to a strengthening
+assumption we make about the Rust ownership model, which obviates the need
+for an aliasing analysis.
+
+The primary goal of this analysis is of course to facilitate C to Rust trans-
+lation. Indeed, as we will see in the rest of the paper, an automated translation
+system is built to encode the ownership models in the generated Rust code which
+is then proven safe by the Rust compiler. But there is more. In contrast to trying
+the Rust compiler as common in existing approaches [14, 26], this analysis ap-
+proach actually extracts new knowledge of ownership from code, which may lead
+to a range of utilities including preventing memory leaks, identifying inherently
+unsafe code fragments, detecting memory bugs, and so on. Speciﬁcally, in this
+paper we
+
+– design a scalable and precise ownership analysis that is able to handle com-
+plex inductively-deﬁned data structures and nested pointers. (Section 5)
+– develop a refactoring mechanism for Rust leveraging ownership analyses to
+
+enhance code safety. (Section 6)
+
+– implement a prototype tool (Crown, standing for C to Rust OWNership
+guided translation) that translates C code into Rust with enhanced safety.
+(Section 7)
+
+– evaluate Crown with a benchmark suite including commonly used data
+structure libraries and real-world projects (ranging from 150 to half a million
+LOC) and compare the result with the state-of-the-art. (Section 8)
+
+2 Background
+
+We start by giving a brief introduction of Rust, in particular its ownership system
+and the use of pointers, as they are core to memory safely.
+
+2.1 Rust ownership model
+
+Ownership in Rust denotes a set of rules that govern how a Rust program man-
+ages memory [28]. The idea is to associate each value with a unique owner. This
+feature is useful for memory management. For example, when the owner goes
+out of scope, the memory allocated for the value can be automatically recycled.
+
+1 let mut v = ...
+2 let mut u = v;
+
+// ownership is transferred to u
+
+Ownership guided C to Rust translation
+
+3
+
+In the above snippet, the assignment of v to u also transfers ownership, after
+which v is dropped from the scope and cannot be used again.
+
+This permanent transfer of ownership gives strong guarantees but can be
+cumbersome to manage in programming. For temporal transfer of ownership
+(known as borrowing), one can use a reference (marked by an ampersand). For
+example, in f(&mut x), the ownership of x’s value is temporally borrowed by to
+the function call until its return.
+
+This concept of time creates another dimension of ownership management
+known as lifetime. For mutable references (as marked by mut in the above ex-
+amples), the rule is relatively simple: only one mutable reference is allowed at
+anytime. But for immutable references (the ones without the mut marking), mul-
+tiple of them can coexist as long as there isn’t any mutable reference at the same
+time. As one can expect, this interaction of mutable and immutable references,
+and their lifetimes is highly non-trivial. In this paper, we focus on analysing
+mutable references as they are far more common than immutable ones.
+
+2.2 Pointer types in Rust
+
+Rust has a richer pointer system than C. The primitive C-style pointers (written
+as *const T or *mut T) are known as raw pointers, which are ignored by the
+Rust compiler for ownership and lifetime checks. Raw pointers are a major source
+of unsafe Rust (more below). Idiomatic Rust instead advocates box pointers
+(written as Box<T>) as owning pointers that uniquely own heap allocations,
+as well as references (written as &mut T or & T as discussed in the previous
+subsection) as non-owning pointers that are used to access values owned by
+others.
+
+C-style array pointers are represented in Rust as references to arrays and slice
+references, with array bounds known at compile time and runtime, respectively.
+The creation of meta-data such as array bounds is beyond the scope of ownership
+analysis. In this work, we keep array pointers as raw pointers in the translated
+code.
+
+2.3 Unsafe Rust
+
+As a pragmatic design, Rust allows programs to contain features that cannot
+be veriﬁed by the compiler as memory safe. This includes dereferencing raw
+pointers, calling low level functions, and so on. Such uses must to marked by
+the unsafe keyword and form fragments of unsafe Rust. It is worth noting that
+unsafe does not turn oﬀ compiler checks; safe pointers are still checked.
+
+The main purpose of unsafe Rust is to support low-level systems program-
+ming. But it can also be used for other reasons. For example, c2rust [21] directly
+translates C pointers into raw pointers. Without unsafe Rust, the generated code
+would not compile.
+
+4
+
+Hanliang Zhang, Cristina David, Yijun Yu, and Meng Wang
+
+3 Overview
+
+In this section, we present an overview of Crown via two examples. The ﬁrst
+example provides a detailed description of the push method for a singly-linked
+list, whereas the second shows a snippet from a real-world benchmark.
+
+1 struct Node {
+2
+int data;
+3
+struct Node * next;
+4 };
+5
+6 struct List {
+7
+8 };
+9
+
+Node * head;
+
+10 void push(struct List* list, int
+new_data) {
+
+11
+
+12
+13
+14
+15 }
+16
+
+struct Node* new_node = (struct
+Node*) malloc(sizeof(struct
+Node));
+
+new_node->data = new_data;
+new_node->next = list->head;
+list->head
+
+= new_node;
+
+(a) C code
+
+1 #[repr(C)]
+2 #[derive(Copy, Clone)]
+3 pub struct Node {
+4
+pub data: i32,
+5
+pub next: *mut Node,
+6 }
+7
+8 #[repr(C)]
+9 #[derive(Copy, Clone)]
+
+pub head: *mut Node,
+
+10 pub struct List {
+11
+12 }
+13
+14 pub unsafe extern "C" fn push(mut
+
+list: *mut List, mut
+new_data: i32) {
+
+let mut new_node = malloc(::std
+::mem::size_of::<Node>() as
+libc::c_ulong) as *mut Node;
+
+(*new_node).data = new_data;
+(*new_node).next = (*list).head;
+(*list).head = new_node;
+
+15
+
+16
+17
+18
+19 }
+20
+
+(b) c2rust result
+
+1 #[repr(C)]
+2 pub struct Node {
+3
+pub data: i32,
+4
+pub next: Option<Box<Node>>,
+5 }
+6
+7 #[repr(C)]
+8 pub struct List {
+9
+10 }
+11
+12 pub unsafe extern "C" fn push(mut
+
+pub head: Option<Box<Node>>,
+
+list: Option<&mut List>, mut
+
+new_data: i32) {
+
+let mut new_node = Some(Box::new
+
+(<Node as Default>::default
+()));
+
+(*new_node.as_deref_mut().unwrap
+
+()).data = new_data;
+
+(*new_node.as_deref_mut().unwrap
+
+()).next = (*list.
+as_deref_mut().unwrap()).
+head.take();
+
+(*list.as_deref_mut().unwrap()).
+
+head = new_node;
+
+13
+
+14
+
+15
+
+16
+
+17 }
+18
+
+(c) Crown result
+
+Fig. 1: Pushing into a singly-linked list
+
+3.1 Pushing into a singly-linked list
+
+The C code of function push in ﬁgure 1a allocates a new node where it stores
+the data received as argument. The new node subsequently becomes the head of
+list. This code is translated by c2rust to the Rust code in ﬁgure 1b. Notably,
+the c2rust translation is syntax-based and simply changes all the C pointers to
+*mut raw pointers. Given that dereferencing raw pointers is considered an unsafe
+operation in Rust (e.g. the dereferencing of new_node at line 16 in ﬁgure 1b),
+method push must be annotated with the unsafe keyword. Additionally, c2rust
+introduces two directives for the two struct deﬁnitions, #[repr(C)] and #[
+derive(Copy, Clone)]. The former keeps the data layout the same as in C for
+possible interoperation, and the latter instructs that the corresponding type can
+only be duplicated through copying.
+
+While c2rust uses raw pointers in the translation, the ownership scheme in
+ﬁgure 1b obeys the Rust ownership model, meaning that the raw pointers could
+be translated to safe ones. A pointer to a newly allocated node is assigned to
+new_node at line 15. This allows us to infer that the ownership of the newly
+
+Ownership guided C to Rust translation
+
+5
+
+allocated node belongs to new_node. Then, at line 18, the ownership is trans-
+ferred from new_node to (*list).head. Additionally, if (*list).head owns any
+memory object prior to line 17, then its ownership is transferred to (*new_node
+).next at line 17. This ownership scheme corresponds to safe pointer use: (i)
+each memory object is associated with a unique owner and (ii) it is dropped
+when its owner goes out of scope. As an illustration for (i), when the ownership
+of the newly allocated memory is transferred from new_node to (*list).head
+at line 18, (*list).head becomes the unique owner, whereas new_node is made
+invalid and it is no longer used. For (ii), given that argument list of push is
+an output parameter (i.e. a parameter that can be accessed from outside the
+function), we assume that it must be owning on exit from the method. Thus,
+no memory object is dropped in the push method, but rather returned to the
+caller.
+
+Crown infers the ownership information of the code translated by c2rust,
+and uses it to translate the code to safer Rust in ﬁgure 1c. As explained next,
+Crown ﬁrst retypes raw pointers into safe pointers based on the ownership
+information, and then rewrites their uses.
+
+Retyping pointers in Crown. If a pointer owns a memory object at any
+point within its scope, Crown retypes it into a Box pointer. For instance, in
+ﬁgure 1c, local variable new_node is retyped to be Option<Box<Node>> (safe
+pointer types are wrapped into Option to account for null pointer values). Vari-
+able new_node is non-owning upon function entry, becomes owning at line 13
+and ownership is transferred out again at line 16.
+
+For struct ﬁelds, Crown considers all the code in the scope of the struct
+declaration. If a struct ﬁeld owns a memory object at any point within the scope
+of its struct declaration, then it is retyped to Box. In ﬁgure 1b, ﬁelds next and
+head are accessed via access paths (*new_node).next and (*list).head, and
+given ownership at lines 17 and 18, respectively. Consequently, they are retyped
+to Box at lines 4 and 9 in ﬁgure 1c, respectively.
+
+A special case is that of output parameters, e.g. list in our example. For
+such parameters, although they may be owning, Crown retypes them to &mut
+in order to enable borrowing. In push, the input argument list is retyped to
+Option<&mut List> .
+
+Rewriting pointer uses in Crown. After retyping pointers, Crown rewrites
+
+their uses. The rewrite process takes into consideration both their new type
+and the context in which they are being used. Due to the Rust semantics, the
+rewrite rules are slightly intricate (see section 6). For instance, the dereference of
+new_node at line 14 is rewritten to (*new_node).as_deref_mut().unwrap() as
+it needs to be mutated and the optional part of the Box needs to be unwrapped.
+Similarly, at line 15, (*list).head is rewritten to be ((*list.as_deref_mut()
+).unwrap()).head.take() as the LHS of the assignment expects a Box pointer.
+
+3.2 Freeing an argument list in bzip2
+
+We next show the transformation of a real-world code snippet with a loop struc-
+ture: a piece of code in bzip2 that frees argument lists. bzip2 deﬁnes a singly-
+
+6
+
+Hanliang Zhang, Cristina David, Yijun Yu, and Meng Wang
+
+1 typedef
+2 struct zzzz {
+3
+*name;
+Char
+4
+struct zzzz *link;
+5 }
+6 Cell;
+7 [...]
+8 Cell* aa = argList;
+9 while (aa != NULL) {
+
+10
+11
+12
+13
+14
+15 }
+16
+
+Cell* aa2 = aa->link;
+if (aa->name)
+
+free(aa->name);
+
+free(aa);
+aa = aa2;
+
+(a) C deﬁnition
+
+pub name: *mut Char,
+pub link: *mut zzzz,
+
+1 #[derive(Copy, Clone)]
+2 #[repr(C)]
+3 pub struct zzzz {
+4
+5
+6 }
+7 pub type Cell = zzzz;
+8 [...]
+9 let mut aa = argList;
+10 while !aa.is_null() {
+11
+12
+13
+
+14
+15
+16
+17 }
+18
+
+let mut aa2 = (*aa).link;
+if !(*aa).name.is_null() {
+
+free((*aa).name as *mut libc
+::c_void);
+
+}
+free(aa as *mut libc::c_void);
+aa = aa2;
+
+(b) c2rust result
+
+1 #[repr(C)]
+2 pub struct zzzz {
+3
+
+pub name: *mut /* owning */ Char
+
+,
+
+pub link: Option<Box<zzzz>>,
+
+4
+5 }
+6 pub type Cell = zzzz;
+7 [...]
+8 let mut aa = argList;
+9 while !aa.as_deref().is_none() {
+
+10
+
+11
+
+12
+
+13
+14
+15 }
+16
+
+let mut aa2 = (*aa.as_deref_mut
+().unwrap()).link.take();
+
+if !(*aa.as_deref().unwrap()).
+
+name.is_null {
+free((*aa.as_deref().unwrap
+()).name as *mut libc::
+c_void);
+
+}
+aa = aa2;
+
+(c) Crown result
+
+Fig. 2: Freeing an argument list
+
+linked list like structure, Cell, that holds a list of argument names. In ﬁgure 2,
+we extract from the source code a snippet that frees the argument lists. Here,
+the local variable argList is an already constructed argument list, and Char is
+a type alias to C-style characters.
+
+Crown accurately infers an ownership scheme for this snippet. Firstly, own-
+ership of argList is transferred to aa, which is to be freed in the subsequent
+loop. Inside the loop, ownership of link accessed from aa is ﬁrstly transferred
+to aa2, then ownership of name accessed from aa is released in a call to free.
+After the loop, ownership of aa is also released. Last of all, aa regains ownership
+from aa2.
+
+Handling of loops. For loops, Crown only analyses their body once as
+that will already expose all the ownership information. For inductively deﬁned
+data structures such as Cell, while further unrolling of loop bodies explores the
+data structures deeper, it does not expose any new struct ﬁelds: pointer vari-
+ables and pointer struct ﬁelds do not change ownership between loop iterations.
+Additionally, Crown emits constraints that equate the ownership of all local
+pointers at the loop entry and exit. For example, the ownership statuses of aa
+and aa2 at loop entry are made equal with those at loop exit, and inferred to
+be owning and non-owning, respectively.
+
+Handling of null pointers. It is a common C idiom for pointers to be
+checked against null after malloc or before free: if !p.is_null() { free(p);
+}. This could be problematic since the then-branch and the else-branch would
+have conﬂicting ownership statuses for p. We adopt a similar solution as [19]:
+we insert an explicit null assignment in the null branch if !p.is_null() {
+free(p); } else { p = ptr::null_mut(); }. As we treat null pointers as
+both owning and non-owning, the ownership of p will be dictated by the non-null
+branch, enabling Crown to infer the correct ownership scheme.
+
+Ownership guided C to Rust translation
+
+7
+
+Translation. With the above ownership scheme, Crown performs the rewrites
+
+as in Figure 2c . Note that we do not attempt to rewrite name since it is an array
+pointer (see section 7 for limitations).
+
+4 Architecture
+
+In this section, we give a brief overview of Crown’s architecture. Crown takes
+as input Rust programs automatically translated by c2rust. These programs
+are very similar to the original C ones, where the C syntax is replaced by Rust
+syntax. Crown applies several static analyses on the MIR of Rust to infer
+properties of pointers:
+
+– Ownership analysis: computes ownership information about the pointers
+in the code, i.e. for each pointer it infers whether it is owning/non-owning
+at particular program locations.
+
+– Mutability analysis: infers which pointers are used to modify the object
+
+they point to (inspired by [18, 20]).
+
+– Fatness analysis: distinguishes array pointers from non-array pointers (in-
+
+spired by [27]).
+
+The results of these analyses are summarised as type qualiﬁers [17]. A type
+qualiﬁer is an atomic property (i.e., ownership, mutability, and fatness) that
+‘qualiﬁes’ the standard pointer type. These qualiﬁers are then utilised for pointer
+retyping. For example, an owning, non-array pointer is retyped to Box . After
+pointers have been retyped, Crown rewrites their usages accordingly.
+
+5 Ownership Analysis
+
+The goal of our ownership analysis is to compute an ownership scheme for a
+given program that obeys the Rust ownership model, if such a scheme exists. The
+ownership scheme contains information about whether pointers in the program
+are owning or non-owning at particular program locations. At a high-level, our
+analysis works by generating a set of ownership constraints (section 5.2), which
+are then solved by a SAT solver (section 5.3). A satisfying assignment for the
+ownership constraints is an ownership scheme that obeys the Rust semantics.
+
+Our ownership analysis is ﬂow and ﬁeld sensitive, where the latter enables
+inferring ownership information for pointer struct ﬁelds. To satisfy ﬁeld sensi-
+tivity, we track ownership information for access paths [8, 12, 24]. Access paths
+represent a memory location by the way it is accessed from an initial, base
+variable, and comprise of the base variable and a sequence of ﬁeld selection op-
+erators. For the program Figure 1b, some example access paths are new_node
+(consists only of the base variable), (*new_node).next, and (*list).head. Our
+analysis associates an ownership variable with each access path, e.g. p has asso-
+ciated ownership variable Op, and (*p).next has associated ownership variable
+O(∗p).next. Each ownership variable can take value 1 if the corresponding access
+
+8
+
+Hanliang Zhang, Cristina David, Yijun Yu, and Meng Wang
+
+path is owning, or 0 if it is non-owning. By ownership of an access path we mean
+the ownership of the ﬁeld (or, more generally, pointer) accessed last through the
+access path, e.g. the ownership of (*new_node).next refers to the ownership of
+ﬁeld next.
+
+5.1 Ownership and aliasing
+
+One of the main challenges of designing an ownership analysis is the interaction
+between ownership and aliasing. To understand the problem, let us consider
+the pointer assignment at line 3 in the code listing below. We assume that the
+lines before the assignment allow inferring that q, (*q).next and r are owning,
+whereas p and (*p).next are non-owning. Additionally, we assume that the lines
+after the assignment require (*p).next to be owning (e.g. (*p).next is being
+explicitly freed). From this, an ownership analysis could reasonably conclude that
+ownership transfer happens at line 3 (such that (*p).next becomes owning), and
+the inferred ownership scheme obeys the Rust semantics.
+
+1
+
+2
+
+3
+
+4
+
+let p, r, q : *mut Node;
+// p and (*p).next non-owning; q, (*q).next and r owning
+(*p).next = r;
+// (*p).next must have ownership
+
+Let’s now also consider aliasing. A possible assumption is that, just before line
+3, p and q alias, meaning that (*p).next and (*q).next also alias. Then, after
+line 3, (*p).next and (*q).next will still alias (pointing to the same memory
+object). However, according to the ownership scheme above, both (*p).next
+and (*q).next are owning, which is not allowed in Rust, where a memory
+object must have a unique owner. This discrepancy was not detected by the
+ownership analysis mimicked above. The issue is that the ownership analysis
+ignored aliasing. Indeed, ownership should not be transferred to (*p).next if
+there exists an owning alias that, after the ownership transfer, continues to point
+to the same memory object as (*p).next.
+
+Precise aliasing information is very diﬃcult to compute, especially in the
+presence of inductively deﬁned data structures. In the current paper, we allevi-
+ate the need to check aliasing by making a strengthening assumption about the
+Rust ownership model: we restrict the way in which pointers can acquire owner-
+ship along an access path, thus limiting the interaction between ownership and
+aliasing. In particular, we introduce a novel concept of ownership monotonicity.
+This property states that, along an access path, the ownership values of pointers
+can only decrease (see deﬁnition 1, where is pref ix(p, q) returns true if access
+path p is a preﬁx of q, and false otherwise – e.g. is pref ix(p, (∗p).next) = true).
+Going back to our example, the ownership monotonicity implies that, for access
+path (*p).next we have Op ≥ O(∗p).next, and for access path (*q).next we
+have Oq ≥ O(∗q).next. This means that, if (*p).next is allowed to take own-
+ership, then p must already be owning. Consequently, all aliases of p must be
+
+Ownership guided C to Rust translation
+
+9
+
+non-owning, which means that all aliases of (*p).next, including (*q).next,
+are non-owning.
+
+Deﬁnition 1 (Ownership monotonicity). Given two access paths p and q,
+if is pref ix(p, q), then Op ≥ Oq.
+
+Ownership monotonicity is stricter than the Rust semantics, causing our analysis
+to potentially reject some ownership schemes that would otherwise be accepted
+by the Rust compiler. We will come back to this point later in the section.
+
+5.2 Generation of ownership constraints
+
+During constraint generation, we assume a given k denoting the length of the
+longest access path used in the code. This enables us to capture the ownership
+of all the access paths exposed in the code. Later in this section, we will discuss
+the handling of loops, which may expose longer access paths.
+
+Next, we denote by P the set of all access paths in a program, base var(p)
+returns the base variable of access path p, and |p| computes the length of the
+access path p in terms of applied ﬁeld selection operators from the base vari-
+able. For illustration, base var((∗p).next) = p, base var(p) = p, |p| = 1 and
+|(∗p).next| = 2. Then, we deﬁne ap(v, lb, ub) to return the set of access paths
+with base variable v and length in between lower bound lb and upper bound ub:
+ap(v, lb, ub) = {p ∈ P|base var(p) = v ∧ lb ≤ |p| ≤ ub}. For illustration, we have
+ap(new node, 1, 2) = {new node, (∗new node).next}.
+
+ASSIGN
+
+a = base var(v), b = base var(w),
+p ∈ ap(a, |v|, k), q ∈ ap(b, |w|, k), r ∈ ap(a, 1, |v|−1), s ∈ ap(b, 1, |w|−1)
+|p| − |v| = |q| − |w|, |r| = |s|
+
+′
+
+C
+
+= C ∪ {Op = 0 ∧ Op′ + Oq′ = Oq ∧ Or′ = Or ∧ Os′ = Os}
+
+C ⊢ v = w; ⇒ C
+
+′
+
+Fig. 3: Ownership constraint generation for assignment
+
+Ownership transfer. The program instructions where ownership transfer
+can happen are (pointer) assignment and function call. Here we discuss assign-
+ment and, due to space constraints, we leave the rules for interprocedural owner-
+ship analysis in Appendix A. Our rule for ownership transfer at assignment site
+follows Rust’s Box semantics: when a Box pointer is moved, the object it points
+to is moved as well. For instance, in the following Rust pseudocode snippet:
+
+1 let p,q: Box<Box<i32>>;
+2 let p = q; // ownership transfer occurs
+3 // the use of q and *q is disallowed
+
+when ownership is transferred from q to p, *q also loses ownership. Except for
+reassignment, the use of a Box pointer after it lost its ownership is disallowed,
+hence the use of q or *q is forbidden at line 3.
+
+10
+
+Hanliang Zhang, Cristina David, Yijun Yu, and Meng Wang
+
+Consequently, we enforce the following ownership transfer rule: if ownership
+transfer happens for a pointer variable (e.g. p and q in the example), then it
+must happen for all pointers reachable from that pointer (e.g. *p and *q). The
+ownership of pointer variables from which the pointer under discussion is reach-
+able remains the same (e.g. if ownership transfer happens for some assignment
+*p = *q in the code, then q and p retain their respective previous ownership
+values).
+
+Possible ownership transfer at pointer assignment: The ownership transfer
+rule at pointer assignment site is captured by rule ASSIGN in Figure 3. The
+judgement C ⊢ v = w; ⇒ C′ denotes the fact that the assignment is analysed
+under the set of constraints C, and generates C′. We use prime notation to
+denote variables after the assignment. Given pointer assignment v = w, p and
+q represent all the access paths respectively starting from v and w, whereas r
+and s denote the access paths from the base variables of v and w that reach
+v and w, respectively. Then, equality Op′ + Oq′ = Oq captures the possibility
+of ownership transfer for all access paths originating at v and w: (i) If transfer
+happens then the ownership of q transfers to p′ (Op′ = Oq and Oq′ = 0). (ii)
+Otherwise, the ownership values are left unchanged (Op′ = Op and Oq′ = Oq).
+The last two equalities, Or′ = Or ∧ Os′ = Os, denote the fact that, for both (i)
+and (ii), pointers on access paths r and s retain their previous ownership.
+
+C memory leaks: In the ASSIGN rule, we add constraint Op = 0 to C′ in order
+to force p to be non-owning before the assignment. Conversely, having p owning
+before being reassigned via the assignment under analysis signals a memory leak
+in the original C program. Given that in Rust memory is automatically returned,
+allowing the translation to happen would change the semantics of the original
+program by ﬁxing the memory leak. Instead, our design choice is to disallow the
+ownership analysis from generating such a solution.
+
+Simultaneous ownership transfer along an access path: One may observe that
+the constraints generated by ASSIGN do not fully capture the stated ownership
+transfer rule. In particular, they do not ensure that, whenever ownership transfer
+occurs from w to v, it also transfers for all pointers on all access paths p and
+q. Instead, this is implicitly guaranteed by the ownership monotonicity rule, as
+stated in theorem 1.
+
+Theorem 1 (Ownership transfer). If ownership is transferred from w to v,
+then, by the ASSIGN rule and ownership monotonicity, ownership also transfers
+between corresponding pointers on all access paths p and q: Op′ = Oq and Oq′ =
+0. (proof in Appendix C)
+
+Ownership and aliasing: We saw in section 5.1 that aliasing may cause sit-
+uations in which, after ownership transfer, the same memory object has more
+than one owner. Theorem 2 states that this is not possible under ownership
+monotonicity.
+
+Theorem 2 (Soundness of ASSIGN under ownership monotonicity).
+Under ownership monotonicity, if all allocated memory objects have a unique
+
+Ownership guided C to Rust translation
+
+11
+
+owner before the application of ASSIGN, then they will also have a unique owner
+after ASSIGN. (proof in Appendix B)
+
+Intuitively, theorem 2 enables a pointer to acquire ownership without hav-
+ing to consider aliases: after ownership transfer, this pointer will be the unique
+owner. The idea resembles that of strong updatess [25].
+
+Additional access paths: As a remark, it is possible for v and w to be accessible
+from other base variables in the program. In such cases, given that those access
+paths are not explicitly mentioned at the location of the ownership transfer, we
+do not generate new ownership variables for them. Consequently, their current
+ownership variables are left unchanged by default.
+
+Ownership transfer example. To illustrate the ASSIGN rule, we use the
+singly-linked list example below, where we assume that p, q are both of type
+*mut Node. Therefore, we will have to consider the following four access path
+p, q, (*p).next, (*q).next. In SSA-style, at each line in the example, we
+generate new ownership variables (by incrementing their subscript) for the access
+paths mentioned at that line. For the ﬁrst assignment, ownership transfer can
+happen between p and q, and (∗p).next and (∗q).next, respectively. For the sec-
+ond assignment, ownership can be transferred between (∗p).next and (∗q).next,
+while p and q must retain their previous ownership.
+
+1 p = q;
+
+2
+
+// Op1 = 0 ∧ Op2 + Oq2 = Oq1 ∧
+// O(∗p1).next = 0 ∧ O(∗p2).next + O(∗q2).next = O(∗q1).next
+
+3 (*p).next = (*q).next;
+
+4
+
+5
+
+// Op3 = Op2 ∧ Oq3 = Oq2 ∧
+// O(∗p2).next = 0 ∧ O(∗p3).next + O(∗q3).next = O(∗q2).next
+
+Besides generating ownership constraints for assignments, we must model
+the ownership information for commonly used C standard function like malloc,
+calloc, realloc, free, strcmp, memset, etc.. Due to space constraints, more
+details about these, as well as the rules for ownership monotonicity and inter-
+procedural ownership analysis are provided in Appendix A.
+
+Handling conditionals and loops. As mentioned in section 3.2, we only
+analyse the body of loops once as it is suﬃcient to expose all the required own-
+ership variables. For inductively deﬁned data structures, while further unrolling
+of loop bodies increases the length of access paths, it does not expose any new
+struct ﬁelds (struct ﬁelds do not change ownership between loop iterations).
+
+To handle join points of control paths, we apply a variant of the SSA con-
+struction algorithm [4], where diﬀerent paths are merged via φ nodes. The value
+of each ownership variable must be the same on all joined paths, or otherwise
+the analysis fails.
+
+5.3 Solving ownership constraints
+
+The ownership constraint system consists of a set of 3-variable linear constraints
+of the form Ov = Ow + Ou, and 1-variable equality constraints Ov = 0 and
+Ov = 1.
+
+12
+
+Hanliang Zhang, Cristina David, Yijun Yu, and Meng Wang
+
+Deﬁnition 2 (Ownership constraint system). An ownership constraint sys-
+tem (P, ∆, Σ, Σ¬) consists of a set of ownership variables P that can have either
+value 0 or 1, a set of 3-variable equality constraints ∆ ⊆ P × P × P , and two
+sets of 1-variable equality constraints, Σ, Σ¬ ⊆ P . The equalities in Σ are of the
+form x = 1, whereas the equalities in Σ¬ are of the form x = 0.
+
+Theorem 3 (Complexity of the ownership constraint solving). The own-
+ership constraint solving is NP-complete. (proof in Appendix D)
+
+We solve the ownership constraints by calling a SAT solver. The ownership
+constraints may have no solution. This happens when there is no ownership
+scheme that obeys the Rust ownership model and the ownership monotonicity
+property (which is stricter than the Rust model for some cases), or the original
+C program has a memory leak.
+
+Due to the complex Rust semantics, we do not formally prove that a satisfying
+assignment obeys the Rust ownership model. Instead, this check is performed
+after the translation by running the Rust compiler.
+
+5.4 Discussion on ownership monotonicity
+
+As mentioned earlier in section 5.4, ownership monotonicity is stricter than
+the Rust semantics, causing our analysis to potentially reject some ownership
+schemes that would otherwise be accepted by the Rust compiler. The most sig-
+niﬁcant such scenario that we identiﬁed is that of reference output parameter.
+This denotes a function parameter passed as a reference, which acts as an output
+as it can be accessed from outside the function (e.g. list in ﬁgure 1a). For such
+parameters, the base variable is non-owning (as it is a reference) and mutable,
+whereas the pointers reachable from it may be owning (see example in ﬁgure 1c,
+where (*node).head gets assigned a pointer to a newly allocated node). We
+detect such situations and explicitly enable them. In particular, we explicitly
+convert owning pointers p to &mut(*p) at the translation stage.
+
+6 C to Rust Translation
+
+Crown uses the results of the ownership, mutability and fatness analyses to
+perform the actual translation, which consists of retyping pointers (section 6.1)
+and rewriting pointer uses (section 6.2).
+
+6.1 Retyping pointers
+
+As mentioned in section 2.2, we do not attempt to translate array pointers to
+safe pointers. In the rest of the section, we focus on mutable, non-array pointers.
+The translation requires a global view of pointers’ ownership, whereas infor-
+mation inferred by the ownership analysis refers to individual program locations.
+For the purpose of translation, given that we refactor owning pointers into box
+
+Ownership guided C to Rust translation
+
+13
+
+pointers, a pointer is considered (globally) owning if it owns a memory object at
+any program location within its scope. Otherwise, it is (globally) non-owning.
+When retyping pointer ﬁelds of structs, we must consider the scope of the struct
+declaration, which generally transcends the whole program. Within this scope,
+each ﬁeld is usually accessed from several base variables, which must all be taken
+into consideration. For instance, given the List declaration in ﬁgure 1b and two
+variables l1 and l2 of type *mut List. Then, in order to determine the own-
+ership status of ﬁeld next, we have to consider all the access paths to next
+originating from both base variables l1 and l2.
+
+The next table shows the retyping rules for mutable, non-array pointers,
+where we wrap safe pointer types into Option to account for null pointer values:
+
+Owning
+
+Non-array pointers
+Option<Box<T>>
+
+Non-owning *mut T or Option<&mut T>
+
+The non-owning pointers that are kept as raw pointers *mut T correspond
+to mutable local borrows. For Crown to soundly translate to mutable local
+borrows, it would have to reason about lifetime information. Given that in Rust
+there can’t be two mutable references to a value, Crown would have to check
+that there is no overlap between the lifetimes of diﬀerent mutable references
+to the same object. In this work, we chose not to do this and instead leave it
+as a future work (as also mentioned under limitations in section 7). Notably,
+this restriction does not apply to output parameters, for which we translate to
+mutable references. This already covers the majority of mutable references – Das
+observed that, in C code, most references arise because the address of a variable
+is passed as a parameter [11]. Notably, the lack of a lifetime analysis means that
+we also can’t handle immutable local borrows, hence our translation’s focus on
+mutable pointers.
+
+6.2 Rewriting pointer uses
+
+The rewrite of a pointer expression depends on its new type and the context
+in which it is used. For example, when rewriting q in p = q, the context will
+depend on the new type of p. Based on this new type, we can have four contexts:
+BoxCtxt which requires Box pointers, MutCtxt which requires &mut references,
+ConstCtxt which requires & references, and RawCtxt which requires raw pointers.
+For example, if p above is a Box pointer, then we rewrite q in a BoxCtxt.
+
+Then, the rewrite takes place according to the following table, where columns
+correspond to the new type of the pointer to be rewritten, and rows represent
+possible contexts 3.
+
+Option<Box<T>>
+p.take()
+
+Option<&mut T>
+⊥
+
+BoxCtxt
+MutCtxt p.as_deref_mut() p.as_deref_mut()
+ConstCtxt
+RawCtxt
+
+p.as_deref()
+to_raw(&mut p)
+
+p.as_deref()
+to_raw(&mut p)
+
+*mut T
+Some(Box::from_raw(p))
+p.as_mut()
+p.as_ref()
+p
+
+3 The cell marked as ⊥ is not applicable due to our treatment of output parameter.
+
+14
+
+Hanliang Zhang, Cristina David, Yijun Yu, and Meng Wang
+
+Our translation uses functions from the Rust standard library, as follows:
+1. When Option<Box<T>> is passed to a BoxCtxt, we expect a move, and con-
+sequently we use take to replace the value inside the option with None;
+2. We use as_deref and as_deref_mut in order to not consume the original
+option, and we create new options with references to the original ones;
+
+3. as_mut and as_ref converts raw pointers to references;
+4. Box::from_raw converts raw pointers into Box pointers.
+
+We also deﬁne the helper function to_raw that transform safe pointers into
+
+raw pointers:
+
+fn to_raw<T>(b: &mut Option<Box<T>>) -> *mut T {
+
+b.as_deref_mut().map(|b| b as *mut T).unwrap_or(null_mut())
+
+}
+
+Here, we explain to_raw for a Box argument (the explanation for &mut is the
+same because of the polymorphic nature of as_deref_mut):
+
+1. To convert Option<Box<T>>, we ﬁrst mutably borrow the entire option as
+denoted by the mutable borrow argument of the helper function. This is
+needed because Option is not copyable, and it would be otherwise consumed;
+
+2. as_deref_mut converts &mut Option<Box<T>> to Option<&mut T>;
+3. map converts the optional part of the reference into an option of raw pointers;
+4. Finally, unwrap_or returns the Some value of the option, or a null pointer
+
+std::ptr::null_mut() if the value is None.
+
+Dereferences: When a pointer p is dereferenced as part of a larger expression
+
+(e.g. (*p).next), we need an additional unwrap().
+
+Box pointers check: Rust disallows the use of Box pointers after they lost
+their ownership. As this rule cannot be captured by the ownership analysis,
+such situations are detected at translation stage, and the culpable Box pointers
+are reverted back to raw pointers.
+
+For brevity, we omitted the slightly diﬀerent treatment of struct ﬁelds that
+
+are not of pointer type.
+
+7 Challenges of Handling Real-World Code
+
+We designed Crown to be able to analyse and translate real-world code, which
+poses signiﬁcant challenges. In this section, we discuss some of the engineering
+challenges of Crown and its current limitations.
+
+7.1 Preprocessing
+
+During the transpilation of C libraries, c2rust treats each ﬁle as a separate com-
+pilation unit, which gets translated into a separate Rust module. Consequently,
+struct deﬁnitions are duplicated, and available function deﬁnitions are put in
+extern blocks [14]. We apply a preprocessing step similar to the resolve-imports
+tool of Laertes [14] that links those deﬁnitions across ﬁles.
+
+Ownership guided C to Rust translation
+
+15
+
+7.2 Limitations of the ownership analysis
+
+There are a few C constructs and idioms that are not fully supported by our im-
+plementation, for which Crown generates partial ownership constraints. Crown’s
+translation will attempt to rewrite a variable as long as there exists a constraint
+involving it. As a result, the translation is in theory neither sound nor complete:
+it may generate code that does not compile (though we have not observed this in
+practice (see Section 8)) and it may leave some pointers as raw pointers resulting
+in a less than optimal translation. We list below the cases when such a scenario
+may happen.
+
+Certain unsafe C constructs. For type casts, we only generate ownership trans-
+fer constraints for head pointers; for unions we assume that they contain no
+pointer ﬁelds and consequently, we generate no constraints; similarly, we gener-
+ate no constraints for variadic arguments. We noticed that unions and variadic
+arguments may cause our tool to crash (e.g. three of the benchmarks in [14],
+as mentioned in Section 8). Those crashes happen when analysing access paths
+that contain dereferences of union ﬁelds (where we assumed no pointer ﬁelds),
+and when analysing calls to functions with variadic arguments where a pointer
+is passed as argument.
+
+Function pointers. Crown does not generate any constraints for them.
+
+Non-standard memory management in C libraries. Certain C libraries wrap
+malloc and free, often with static function pointers (pointers to allocator/deal-
+locator are stored in static variables), or function pointers in structs. Crown
+does not generate any constraints in such scenarios. In C, it is also possible to
+use malloc to allocate a large piece of memory, and then split it into several
+sub-regions assigned to diﬀerent pointers. In our ownership analysis, only one
+pointer can gain ownership of the memory allocated by a call to malloc. Another
+C idiom that we don’t fully support occurs when certain pointers can point to
+either heap allocated objects, or statically allocated stack arrays. Crown gener-
+ates ownership constraints only for the heap and, consequently, those variables
+will be left under-constrained.
+
+7.3 Other limitations of Crown
+
+Array pointers. For array pointers, although Crown infers the correct ownership
+information, it does not generate the meta data required to synthesise Rust code.
+
+Mutable local borrows. As explained in the last paragraph of Section 6.1, Crown
+does not translate mutable non-owning pointers to local mutable references as
+this requires dedicated analysis of lifetimes. Note that Crown does however
+generate mutable references for output parameters.
+
+Access paths that break ownership monotonicity. As discussed in section 5.4,
+ownership monotonicity may be stricter in certain cases than Rust’s semantics.
+
+16
+
+Hanliang Zhang, Cristina David, Yijun Yu, and Meng Wang
+
+8 Experimental Evaluation
+
+We implement Crown on top of the Rust compiler, version nightly-2023-01-26.
+We use c2rust with version 0.16.0. For the SAT solver, we rely on a Rust-binding
+of z3 [16] with version 0.11.2. We run all our experiments on a MacBook Pro with
+an Apple M1 chip, with 8 cores (4 performance and 4 eﬃciency). The computer
+has 16GB RAM and runs macOS Monterey 12.5.1.
+
+Benchmark selection. To evaluate the utility of Crown, we collected
+a benchmark suite of 20 programs (Table 1). These include benchmarks from
+Laertes [14]’s accompanying artifact [13] (marked by * in Table 1)4, and addi-
+tionally 8 real-world projects (binn, brotli, buffer, heman, json.h, libtree,
+lodepng, rgba) together with 4 commonly used data structure libraries (avl,
+bst, ht, quadtree).
+
+Table 1: Benchmark information
+
+229 libcsv*
+4426 libtree
+
+11
+165
+867 537723 libzahl*
+
+Benchmark Files Structs Functions LOC Benchmark
+avl
+binn
+brotli
+bst
+buﬀer
+bzip2*
+genann*
+heman
+ht
+json.h
+
+1207 lodepng
+126 14829 quadtree
+2410 rgba
+
+2
+5
+237
+1
+3
+39
+10
+52
+3
+13
+
+1
+1
+30
+1
+2
+9
+6
+24
+1
+1
+
+3860 urlparser*
+
+154 lil*
+
+10
+53
+
+6
+42
+
+27
+
+302 13762 robotﬁndskitten*
+
+264 tulipindicators*
+
+Files Structs Functions LOC
+23
+976
+32 2610
+108 4655
+136 5670
+236 14153
+31 1216
+19 1855
+18 1508
+229 22363
+21 1379
+
+1
+1
+49
+2
+1
+5
+2
+1
+111
+1
+
+6
+18
+65
+9
+19
+14
+3
+8
+18
+1
+
+8.1 Research questions
+
+We aim at answering the following research questions.
+
+RQ1. How many raw pointers/pointer uses can Crown translate to safe
+pointers/pointer uses?
+RQ2. How does Crown’s result compare with the state-of-the-art [14]?
+RQ3. What is the runtime performance of Crown?
+
+RQ 1: Unsafe pointer reduction. In order to judge Crown’s eﬃcacy,
+we measure the reduction rate of raw pointer declarations and uses. This is a
+direct indicative of the improvement in safety, as safe pointers are always checked
+by the Rust compiler (even inside unsafe regions). As previously mentioned, we
+focus on mutable non-array pointers. The results are presented in Table 2, where
+#ptrs counts the number of raw pointer declarations in a given benchmark,
+#uses counts the number of times raw pointers are being used, and the Laertes
+and Crown headers denote the reduction rates of the number of raw pointers
+
+4 We excluded json-c, optipng, tinycc where Crown crashes because of the uses
+of unions and variadic arguments as discussed in Section 7. Additional programs
+(qsort, grabc, xzoom, snudown, tmux, libxml2) are mentioned in the paper [14] but
+are either missing or incomplete in the artifact [13].
+
+Ownership guided C to Rust translation
+
+17
+
+and raw pointer uses achieved by the two tools, respectively. For instance, for
+benchmark avl, the rate of 100% means that all raw pointer declarations and
+their uses are translated into safe ones. Note that the “-” symbols on the row
+corresponding to robotfindskitten are due to the fact that the benchmark
+contains 0 raw pointer uses.
+
+The median reduction rates achieved by Crown for raw pointers and raw
+pointer uses are 37.3% and 62.1%, respectively. Crown achieves a 100% re-
+duction rate for many non-trivial data structures (avl, bst, buffer, ht), as
+well as for rgba. For brotli, a lossless data compression algorithm developed
+by Google, which is our largest benchmark, Crown achieves reduction rates of
+21.4% and 20.9%, respectively. The relatively low reduction rates for brotli and
+a few other benchmarks (tulipindicators, lodepng, bzip2, genann, libzahl)
+is due to their use of non-standard memory management strategies (discussed
+in detail in Section 7).
+
+Notably, all the translated benchmarks compile under the aforementioned
+Rust compiler version. As a check of semantics preservation, for the benchmarks
+that provide test suites (libtree, rgba, quadtree, urlparser, genann, buffer),
+our translated benchmarks pass all the provided tests.
+
+Table 2: Reduction of (mutable, non-array) raw pointer declarations and uses
+
+Benchmark
+avl
+binn
+brotli
+bst
+buﬀer
+bzip2*
+genann*
+heman
+ht
+json.h
+libcsv*
+libtree
+libzahl*
+lil*
+lodepng
+quadtree
+rgba
+robotﬁndskitten*
+tulipindicators*
+urlparser*
+
+#ptrs
+8
+103
+846
+5
+38
+126
+28
+360
+6
+128
+20
+48
+87
+202
+227
+33
+6
+1
+134
+9
+
+Laertes
+0.0%
+46.6%
+0.0%
+0.0%
+0.0%
+14.3%
+0.0%
+30.3%
+33.3%
+2.3%
+65.0%
+29.2%
+2.2%
+9.2%
+46.3%
+0.0%
+83.3%
+0.0%
+0.0%
+0.0%
+
+Crown
+100.0%
+65.0%
+21.4%
+100.0%
+100.0%
+26.2%
+7.1%
+35.0%
+100.0%
+23.4%
+70.0%
+39.6%
+16.1%
+18.8%
+44.9%
+42.4%
+83.3%
+0.0%
+0.7%
+11.1%
+
+#uses
+41
+247
+3686
+22
+56
+2946
+160
+926
+28
+647
+141
+227
+279
+1018
+1232
+117
+12
+0
+625
+40
+
+Laertes
+0.0%
+62.3%
+0.0%
+0.0%
+0.0%
+2.2%
+0.0%
+50.2%
+42.9%
+1.2%
+97.9%
+33.0%
+4.1%
+51.4%
+40.4%
+0.0%
+100.0%
+-
+0.0%
+0.0%
+
+Crown
+100.0%
+71.3%
+20.9%
+100.0%
+100.0%
+3.7%
+15.0%
+60.2%
+100.0%
+62.1%
+97.9%
+62.1%
+16.8%
+69.4%
+37.7%
+48.7%
+100.0%
+-
+0.0%
+45.0%
+
+RQ 2: Comparing with state-of-the-art. The comparison of Crown
+with Laertes [14] is also shown in Table 2, with bold font highlighting better
+results. The data on Laertes is either directly extracted from the artifact [13] or
+has been conﬁrmed by the authors through private correspondence. We can see
+that Crown outperforms the state-of-the-art (often by a signiﬁcant degree) in
+most cases, with lodepng being the only exception, where we suspect that the
+
+18
+
+Hanliang Zhang, Cristina David, Yijun Yu, and Meng Wang
+
+reason also lies with non-standard memory management strategies mentioned
+before. Laertes is less aﬀected by this as it does not rely on ownership analysis.
+RQ 3: Runtime performance. Although our analysis relies on solving a
+constraint satisfaction problem that is proven to be NP-complete, in practice
+the runtime performance of Crown is consistently high. The execution time of
+the analysis and the rewrite for the whole benchmark suite is within 60 seconds.
+
+9 Related Works
+
+Ownership analysis. The concept of ownership itself is not new. In OO pro-
+gramming, ownership type systems are used to enable controlled aliasing by
+restricting object graphs underlying the runtime heap of object-oriented pro-
+grams [9, 10]. Eﬀorts have been made in the automatic inference of ownership
+types [1, 2, 32], and applications of ownership types for memory management
+[3,33]. Similarly, the concept of ownership has also been applied to analyse C/C++
+programs. Heine et al. [19] inferred pointer ownership type for memory leak de-
+tection. Their encoding of ownership transfer constraints greatly inﬂuenced us.
+Ravitch et al. [30] apply static analysis to infer ownership for automatic library
+binding generation. Our notion of output parameter is inspired by this work.
+Giving the diﬀerent application domains, each of these work makes diﬀerent
+assumptions. Heine et al. [19] assumes that indirectly-accessed pointers cannot
+acquire ownership, whereas Ravitch et al. [30] assumes that all struct ﬁelds are
+owning unless explicitly annotated. Our analysis is free from these assumptions,
+which leads to a more precise analysis necessary for synthesising correct Rust
+code. Lastly, the idea of ownership is also broadly applied in concurrent sepa-
+ration logic [5–7, 15, 31]. The Iris framework [23] is also applied to formalise the
+Rust type system [22] and verifying Rust programs [29].
+
+Type qualiﬁers. Type qualiﬁers are a lightweight, practical mechanism for
+specifying and checking properties not captured by traditional type systems. A
+general ﬂow-insensitive type qualiﬁer framework has been proposed [17], with
+subsequent applications analysing Java reference mutability [18, 20] and C array
+bounds [27]. Our mutability and fatness analyses of Crown are greatly inﬂu-
+enced by these work.
+
+C to Rust Translation. We have already discussed c2rust [21], which is
+an industrial strength tool that converts C to Rust syntax. c2rust does not at-
+tempt to ﬁx unsafe features such as raw pointers and the programs it generates
+are always annotated as unsafe. Nevertheless it forms the bases of other trans-
+lation eﬀorts. CRustS [26] applies AST-based code transformations to remove
+superﬂuous unsafe labelling generated by c2rust. But it does not ﬁx the unsafe
+features either. Laertes [14] is the ﬁrst tool that is actually able to automatically
+reduce the presence of unsafe code. It uses the Rust compiler as a blackbox ora-
+cle and search for code changes that remove raw pointers, which is very diﬀerent
+from Crown in approach (see Section 8 for an experimental comparison).
+
+Ownership guided C to Rust translation
+
+19
+
+10 Conclusion
+
+We devised an ownership analysis for Rust programs translated by c2rust that
+is scalable (handling half a million LOC in less than 10 seconds) and precise (han-
+dling inductive data structures) thanks to a strengthening of the Rust ownership
+model, which we call ownership monotonicity. Based on this new analysis, we
+prototyped a refactoring tool for translating C programs into Rust programs.
+Our experimental evaluation shows that the proposed approach handles real-
+world benchmarks and outperforms the state-of-the-art.
+
+References
+
+1. Aldrich, J., Kostadinov, V., Chambers, C.: Alias annotations
+In: Proceedings of
+
+for pro-
+the 17th ACM SIGPLAN Con-
+gram understanding.
+ference on Object-Oriented Programming, Systems, Languages, and Ap-
+plications. p. 311–330. OOPSLA ’02, Association for Computing Machin-
+ery, New York, NY, USA (2002). https://doi.org/10.1145/582419.582448,
+https://doi.org/10.1145/582419.582448
+
+2. Boyapati, C., Liskov, B., Shrira, L.: Ownership types for object encapsulation.
+In: Proceedings of the 30th ACM SIGPLAN-SIGACT Symposium on Principles
+of Programming Languages. p. 213–223. POPL ’03, Association for Computing
+Machinery, New York, NY, USA (2003). https://doi.org/10.1145/604131.604156,
+https://doi.org/10.1145/604131.604156
+
+3. Boyapati, C., Salcianu, A., Beebee, W., Rinard, M.: Ownership types for
+safe region-based memory management
+In: Proceedings
+of the ACM SIGPLAN 2003 Conference on Programming Language Design
+and Implementation. p. 324–337. PLDI ’03, Association for Computing Ma-
+chinery, New York, NY, USA (2003). https://doi.org/10.1145/781131.781168,
+https://doi.org/10.1145/781131.781168
+
+in real-time java.
+
+4. Briggs, P., Cooper, K.D., Harvey, T.J., Simpson, L.T.: Practical improvements to
+the construction and destruction of static single assignment form. Softw. Pract.
+Exper. 28(8), 859–881 (jul 1998)
+
+S.: Variables
+and
+
+5. Brookes,
+mantics
+123–150
+https://doi.org/10.1016/j.entcs.2006.04.008
+
+resource
+
+2006).
+
+(may
+
+shared-memory programs:
+
+Se-
+158,
+https://doi.org/10.1016/j.entcs.2006.04.008,
+
+soundness. Electron. Notes Theor. Comput.
+
+Sci.
+
+for
+
+as
+
+6. Brookes, S.: A semantics for concurrent separation logic. Theor. Comput.
+Sci. 375(1–3), 227–270 (apr 2007). https://doi.org/10.1016/j.tcs.2006.12.034,
+https://doi.org/10.1016/j.tcs.2006.12.034
+
+7. Calcagno, C., O’Hearn, P.W., Yang, H.: Local action and abstract separation
+logic. In: Proceedings of the 22nd Annual IEEE Symposium on Logic in Com-
+puter Science. p. 366–378. LICS ’07, IEEE Computer Society, USA (2007).
+https://doi.org/10.1109/LICS.2007.30, https://doi.org/10.1109/LICS.2007.30
+8. Cheng, B.C., Hwu, W.M.W.: Modular interprocedural pointer analysis us-
+ing access paths: Design,
+In: Proceedings
+of the ACM SIGPLAN 2000 Conference on Programming Language Design
+and Implementation. p. 57–69. PLDI
+’00, Association for Computing Ma-
+chinery, New York, NY, USA (2000). https://doi.org/10.1145/349299.349311,
+https://doi.org/10.1145/349299.349311
+
+implementation, and evaluation.
+
+20
+
+Hanliang Zhang, Cristina David, Yijun Yu, and Meng Wang
+
+¨Ostlund,
+
+D.,
+types:
+
+9. Clarke,
+ership
+(2013).
+https://lirias.kuleuven.be/1630873
+
+J.,
+survey.
+
+Own-
+Springer
+a
+https://doi.org/https://doi.org/10.1007/978-3-642-36946-9-3,
+
+I., Wrigstad,
+pp.
+
+Sergey,
+vol.
+
+15–58.
+
+7850,
+
+T.:
+
+10. Clarke, D.G., Potter,
+
+J.M., Noble,
+In: Proceedings of
+
+on Object-Oriented Programming, Systems, Languages,
+
+for ﬂexible
+the 13th ACM SIGPLAN Confer-
+alias protection.
+ence
+and Ap-
+plications. p. 48–64. OOPSLA ’98, Association for Computing Machin-
+ery, New York, NY, USA (1998). https://doi.org/10.1145/286936.286947,
+https://doi.org/10.1145/286936.286947
+
+J.: Ownership types
+
+11. Das, M.: Uniﬁcation-based pointer analysis with directional assignments. In: Pro-
+ceedings of the ACM SIGPLAN 2000 Conference on Programming Language
+Design and Implementation. p. 35–46. PLDI ’00, Association for Computing
+Machinery, New York, NY, USA (2000). https://doi.org/10.1145/349299.349309,
+https://doi.org/10.1145/349299.349309
+
+12. De, A., D’Souza, D.: Scalable ﬂow-sensitive pointer analysis for java with strong
+updates. In: Noble, J. (ed.) ECOOP 2012 – Object-Oriented Programming. pp.
+665–687. Springer Berlin Heidelberg, Berlin, Heidelberg (2012)
+
+13. Emre, M.,
+
+Schroeder,
+(Sep
+safer
+https://doi.org/10.5281/zenodo.5442253
+
+R.:
+2021).
+
+rust”
+
+Artifact
+
+to
+https://doi.org/10.5281/zenodo.5442253,
+
+”translating
+
+for
+
+c
+
+14. Emre, M., Schroeder, R., Dewey, K., Hardekopf, B.: Translating C
+rust. Proc. ACM Program. Lang. 5(OOPSLA), 1–29 (2021).
+
+to safer
+https://doi.org/10.1145/3485498, https://doi.org/10.1145/3485498
+
+15. Feng, X.: Local rely-guarantee reasoning. In: Proceedings of the 36th An-
+nual ACM SIGPLAN-SIGACT Symposium on Principles of Programming
+Languages. p. 315–327. POPL ’09, Association for Computing Machin-
+ery, New York, NY, USA (2009). https://doi.org/10.1145/1480881.1480922,
+https://doi.org/10.1145/1480881.1480922
+
+16. Fitzgerald, N., Hoare, G., Mitchener, B., Puri, S.: Rust bindings to the z3 smt
+
+solver. https://crates.io/crates/z3
+
+17. Foster,
+
+J.S.,
+
+type
+
+insensitive
+1035–1087
+https://doi.org/10.1145/1186632.1186635
+
+2006).
+
+(nov
+
+R.,
+
+Johnson,
+Flow-
+qualiﬁers. ACM Trans. Program. Lang. Syst. 28(6),
+https://doi.org/10.1145/1186632.1186635,
+
+Kodumal,
+
+Aiken,
+
+A.:
+
+J.,
+
+18. Greenﬁeldboyce, D., Foster,
+
+J.S.: Type
+
+java.
+22nd Annual ACM SIGPLAN Conference
+In: Proceedings
+on Object-Oriented Programming
+and Applica-
+tions. p. 321–336. OOPSLA ’07, Association for Computing Machinery,
+New York, NY, USA (2007).
+https://doi.org/10.1145/1297027.1297051,
+https://doi.org/10.1145/1297027.1297051
+
+Languages
+
+inference
+
+Systems,
+
+qualiﬁer
+
+the
+
+for
+
+of
+
+19. Heine, D.L., Lam, M.S.: A practical ﬂow-sensitive and context-sensitive C
+and C++ memory leak detector.
+In: Cytron, R., Gupta, R. (eds.) Pro-
+the ACM SIGPLAN 2003 Conference on Programming Lan-
+ceedings of
+guage Design and Implementation 2003, San Diego, California, USA, June
+9-11, 2003. pp. 168–181. ACM (2003). https://doi.org/10.1145/781131.781150,
+https://doi.org/10.1145/781131.781150
+
+20. Huang, W., Milanova, A., Dietl, W., Ernst, M.D.: Reim & reiminfer: Checking
+and inference of reference immutability and method purity. In: Proceedings of the
+ACM International Conference on Object Oriented Programming Systems Lan-
+guages and Applications. p. 879–896. OOPSLA ’12, Association for Computing
+
+Ownership guided C to Rust translation
+
+21
+
+Machinery, New York, NY, USA (2012). https://doi.org/10.1145/2384616.2384680,
+https://doi.org/10.1145/2384616.2384680
+inc., I.: c2rust. https://github.com/immunant/c2rust
+
+21.
+22. Jung, R., Jourdan, J.H., Krebbers, R., Dreyer, D.: Rustbelt: Securing the foun-
+dations of the rust programming language. Proc. ACM Program. Lang. 2(POPL)
+(dec 2017). https://doi.org/10.1145/3158154, https://doi.org/10.1145/3158154
+J.H., Bizjak, A., Birkedal, L.,
+up: A modular
+for
+foundation
+of Functional Pro-
+Journal
+https://doi.org/10.1017/S0956796818000151,
+
+Iris
+Dreyer, D.:
+concurrent
+higher-order
+28(e20)
+gramming
+https://hal.science/hal-01945446
+
+23. Jung, R., Krebbers, R.,
+
+Jourdan,
+ground
+
+from the
+
+separation
+
+(2018).
+
+logic.
+
+24. Lerch, J., Sp¨ath, J., Bodden, E., Mezini, M.: Access-path abstraction: Scaling
+ﬁeld-sensitive data-ﬂow analysis with unbounded access paths (t). In: 2015 30th
+IEEE/ACM International Conference on Automated Software Engineering (ASE).
+pp. 619–629 (2015). https://doi.org/10.1109/ASE.2015.9
+
+25. Lhot´ak, O., Chung, K.C.A.: Points-to analysis with eﬃcient strong updates. In:
+Proceedings of the 38th Annual ACM SIGPLAN-SIGACT Symposium on Princi-
+ples of Programming Languages. p. 3–16. POPL ’11, Association for Computing
+Machinery, New York, NY, USA (2011). https://doi.org/10.1145/1926385.1926389,
+https://doi.org/10.1145/1926385.1926389
+
+trust
+
+- A transpiler
+
+26. Ling, M., Yu, Y., Wu, H., Wang, Y., Cordy, J.R., Hassan, A.E.:
+
+In
+rust we
+In: 44th
+IEEE/ACM International Conference on Software Engineering: Companion
+Proceedings,
+ICSE Companion 2022, Pittsburgh, PA, USA, May 22-24,
+2022. pp. 354–355. ACM/IEEE (2022). https://doi.org/10.1145/3510454.3528640,
+https://doi.org/10.1145/3510454.3528640
+
+from unsafe C to safer
+
+rust.
+
+27. Machiry, A., Kastner, J., McCutchen, M., Eline, A., Headley, K., Hicks, M.:
+C to checked c by 3c. Proc. ACM Program. Lang. 6(OOPSLA1) (apr 2022).
+https://doi.org/10.1145/3527322, https://doi.org/10.1145/3527322
+
+28. Matsakis, N.D., Klock, F.S.: The rust
+
+the
+2014 ACM SIGAda Annual Conference on High Integrity Language Tech-
+103–104. HILT ’14, Association for Computing Machinery,
+nology. p.
+New York, NY, USA (2014).
+https://doi.org/10.1145/2663171.2663188,
+https://doi.org/10.1145/2663171.2663188
+
+In: Proceedings of
+
+language.
+
+code.
+
+foundation for
+
+29. Matsushita, Y., Denis, X., Jourdan, J.H., Dreyer, D.: Rusthornbelt: A
+rust programs with
+43rd ACM SIGPLAN Interna-
+on Programming Language Design and Implementa-
+2022, Association for Computing Machinery,
+https://doi.org/10.1145/3519939.3523704,
+
+semantic
+unsafe
+tional Conference
+tion. p.
+New York, NY, USA (2022).
+https://doi.org/10.1145/3519939.3523704
+
+functional veriﬁcation of
+the
+
+In: Proceedings
+
+841–856. PLDI
+
+of
+
+30. Ravitch, T., Jackson, S., Aderhold, E., Liblit, B.: Automatic generation of
+library bindings using static analysis. In: Hind, M., Diwan, A. (eds.) Pro-
+the 2009 ACM SIGPLAN Conference on Programming Lan-
+ceedings of
+guage Design and Implementation, PLDI 2009, Dublin,
+Ireland, June 15-
+21, 2009. pp. 352–362. ACM (2009). https://doi.org/10.1145/1542476.1542516,
+https://doi.org/10.1145/1542476.1542516
+
+31. Vafeiadis, V., Herlihy, M., Hoare, T., Shapiro, M.: Proving correctness
+of highly-concurrent
+the Eleventh
+ACM SIGPLAN Symposium on Principles and Practice of Parallel Pro-
+
+linearisable objects.
+
+In: Proceedings of
+
+22
+
+Hanliang Zhang, Cristina David, Yijun Yu, and Meng Wang
+
+gramming. p. 129–136. PPoPP ’06, Association for Computing Machin-
+ery, New York, NY, USA (2006). https://doi.org/10.1145/1122971.1122992,
+https://doi.org/10.1145/1122971.1122992
+
+32. Wolﬀ, F., B´ıl´y, A., Matheja, C., M¨uller, P., Summers, A.J.: Modular speciﬁcation
+and veriﬁcation of closures in rust. Proc. ACM Program. Lang. 5(OOPSLA) (oct
+2021). https://doi.org/10.1145/3485522, https://doi.org/10.1145/3485522
+
+33. Zhao, T., Baker, J., Hunt, J., Noble, J., Vitek, J.:
+
+Implicit ownership
+types for memory management. Science of Computer Programming 71(3),
+213–241
+https://doi.org/https://doi.org/10.1016/j.scico.2008.04.001,
+https://www.sciencedirect.com/science/article/pii/S0167642308000300
+
+(2008).
+
+A Ownership constraints
+
+The rules for the ownership monotonicity property, function body and function
+call, as well as selected rules for modelling C library functions can be found in
+Figure 4.
+
+MONOTONE. When a new ownership variable is generated, Crown gen-
+erates a set of constraints meant to enforce the ownership monotonicity property
+as depicted by rule MONOTONE in Figure 4. In the rule, V stands for the set of
+constraint variables, C stands for the set of constraints, and Σ stands for func-
+tion signatures in terms of associated ownership variables. According to the rule,
+if p and q are both access paths with base variable v such that p is a preﬁx of q,
+then the ownership of p is higher or equal to the ownership of q. For instance,
+Crown generates the following for Figure 1b: Onew_node ≥ O(*new_node).next.
+
+For simpilicity, we only make V or Σ explicit in the rules if they are used.
+Also, we assume that whenever a pointer is used, new variables are generated
+and MONOTONE rule is applied.
+
+FREE. When a pointer is passed to free, we generate constraints that
+assert that this pointer is owning prior to the call and non-owning after the
+call Figure 4.
+
+FN-DECL. The rule of generating constraints for function declarations is
+given as FN-DECL, where we consider a function f with output parameters ˜x,
+normal parameters ˜y, and function return z. This rule states that given current
+ownership variables V , constraints C and function signature Σ, the inference of
+the function declaration proceeds to generate ownership constraints for state-
+ments in the function body with V ′, C′, Σ′ updated accordingly. For output
+parameter, we need to generate two sets of ownership variables, one on entry
+and one on exit to represent its input/output ownership status, which we then
+constrain to be one.
+
+FN-CALL. The rule of calling a function is given as FN-CALL. As discussed
+in subsection 5.4, we explicitly convert pointers p to &mut (*p) at output param-
+eter positions. Here we assume that all calling arguments of output parameters
+are in the form &mut p. The rule states that, for normal parameters, the own-
+ership of arguments optionally may transfer to the parameters, as illustrated
+by the 3-variable constraints; for output parameter, the ownership of arguments
+
+Ownership guided C to Rust translation
+
+23
+
+gets borrowed to the parameters: the entry/exit states of parameters are equated
+with pre/post states of arguments.
+
+MONOTONE
+
+a = base var(v)
+
+p, q ∈ ap(v, 1, k)
+= C ∪ {Op≥Oq}
+
+′
+
+C
+
+is preﬁx(p, q)
+V
+
+′
+
+= V ∪ {Op new|p ∈ ap (a, 1, k)}
+
+V, C ⊢ v monotone ⇒ V
+
+′
+
+′
+
+, C
+
+FREE
+′
+C
+
+= C ∪ {Ov = 1 ∧ Ov′ = 0}
+
+C ⊢ free(v) ⇒ C
+
+′
+
+FN-DECL
+
+= V ∪ {Ol|l ∈ ap (~xentry, 1, k) ∪ ap (~xexit, 1, k) ∪ ap (~y, 1, k) ∪ ap (z, 1, k)}
+
+~v ∈ localVars
+
+~stmt
+(cid:0)
+
+(cid:1)
+
+′
+
+V
+
+′
+
+C
+
+FN-CALL
+
+Oentry
+~x
+
+= 1, Oexit
+
+~x = 1o ∪ {Or = 0|r ∈ ap (~vexit, 1, k)}
+
+= C ∪ n
+Σ
+
+′
+
+= Σ ∪ {f (~x; ~y) : z}
+
+′
+
+, Σ
+
+V
+
+′
+
+′
+
+, C
+~stmt
+
+⊢ stmts ⇒ V
+′′
+
+′′
+
+′
+
+⇒ V
+
+, C
+
+, Σ
+
+′′
+
+′′
+
+, C
+
+V, C, Σ ⊢ f (~x; ~y) : z
+
+(cid:8)
+
+(cid:9)
+
+f (~x; ~y) : z ∈ Σ
+
+′
+
+C
+
+= C ∪ {Or′ + Ol = Or|r ∈ ap (q, 1, k) , l ∈ ap (y, 1, k) , |r| − |q| = |l| − |y|}
+
+∪ {Os = On, Os′ = On′ |s ∈ ap (p, 1, k) , n ∈ ap (x, 2, k) , |s| − |p| = |n| − |x| − 1}
+∪ {Ot = 0 ∧ Ot′ = Om|t ∈ ap (r, 1, k) , m ∈ ap (z, 1, k) , |t| − |r| = |m| − |z|}
+C, Σ ⊢ let r = f (&mut ~p; ~q) ⇒ C
+
+′
+
+Fig. 4: Selected ownership rules
+
+B Proof of Theorem 2
+
+Let’s consider a pointer assignment between p and q.
+(i) If there is no ownership transfer, then the conclusion follows from the hy-
+pothesis.
+(ii) If ownership is transferred from q to p, then p′ owns a new object after
+the assignment. For another pointer l to own the same memory object after the
+assignment, l must have been an alias of p before the assignment. Let’s now
+consider all possible access paths for p and l:
+
+– Both are accessed directly: p = q; l. In this case, p′ and l′ are no longer
+aliases after the assignment, meaning that they can’t own the same object.
+– p is accessed indirectly and l directly: ∗p = q; l. If ∗p aliases l, then, again,
+
+∗p′ and l′ are no longer aliases after the assignment.
+
+24
+
+Hanliang Zhang, Cristina David, Yijun Yu, and Meng Wang
+
+– Both are accessed indirectly: ∗p = ∗q; ∗l. In this case, we also need to consider
+
+the potential aliasing between p and l.
+
+• If ∗p aliases ∗l, but p does not alias l, then, again, ∗p′ and ∗l′ are no
+
+longer aliases after the assignment.
+
+• If ∗p aliases ∗l and p aliases l, then, ∗p′ and ∗l′ are aliases after the
+assignment. Now, in order to check whether they can both be owning,
+let’s look at the ownership constraints. We know that ∗p′ is owning,
+meaning that O∗p′ = 1. By ownership monotonicity, we have that Op′ =
+1. Given that p′ aliases l′, we know from the hypothesis that l′ can’t own
+the same object, hence Ol′ = 0. From ownership monotonicity we have
+O∗l′ = 0. Hence, ∗l′ can’t be owning
+
+– Longer access paths follow the same proof as when p is accessed indirectly
+above as it is suﬃcient to only look at the last indirection on the access path.
+
+C Proof of Theorem 1
+
+Proof. Let a = base var(v), b = base var(w). Suppose that p ∈ ap (a, |v|, k),
+q ∈ ap (b, |w|, k) and additionally |p| − |v| = |q| − |w|. By rule ASSIGN, we have
+Op = 0 ∧ Op′ + Oq′ = Oq. By rule MONOTONICITY, we have Ow′ ≥ Oq′ . By
+the hypothesis, ownership transfers from w to v, hence Ow′ = 0, which implies
+Oq′ = 0 and that Op′ = Oq. This means that if q has ownership before the
+assignment, it will then be transferred to p.
+
+D Proof of Theorem 3
+
+Proof. Our proof consists of two parts:
+
+(1) The constraint solving is in NP. We show this by reducing it to SAT in
+
+polynomial time. In particular, each equality can be translated as follows:
+
+– x + y = z is translated to (z ∧ x ∧ ¬y) ∨ (z ∧ ¬x ∧ y) ∨ (¬z ∧ ¬x ∧ ¬y), whose
+CNF is (z ∨y ∨¬x)∧(x∨¬y)∧(z ∨x∨¬y)∧(¬y ∨¬z)∧(x∨ ¬z)∧(x ∨y ∨¬z).
+
+– x = 1 is translated to x.
+– x = 0 is translated to ¬x.
+– x≤y is translated to (¬x ∧ ¬y) ∨ (x ∧ ¬y) ∨ (x ∧ y)
+
+(2) The constraint solving is NP-hard. We show this by reducing the EXACT-
+1-3-SAT problem to ownership constraint solving in polynomial time. EXACT-
+1-3-SAT is the problem of determining if there exists an interpretation that
+satisﬁes a given Boolean formula consisting of conjunctions of 3-literal clauses,
+with the extra restriction that exactly one literal is true per clause.
+
+We next describe how we construct the ownership constraint system. For
+each clause l1 ∨ l2 ∨ l3, we generate three equalities in our constraint system:
+l1 + l2 = not l3, l3 + not l3 = l4 and l4 = 1, where not l3 and l4 are fresh
+variables. Then, the original problem is satisﬁable iﬀ the ownership constraint
+system has a solution. Note that the only satisﬁable conﬁgurations for a clause
+
+Ownership guided C to Rust translation
+
+25
+
+l1 ∨ l2 ∨ l3 are (1, 0, 0), (0, 1, 0), (0, 0, 1), which are exactly the same as for
+l1 + l2 = not l3, l3 + not l3 = l4 and l4 = 1, where, additionally, not l3 = ¬l3
+and l4 = 1. Also, we know that each ownership variable has either value 0 or 1.
+
+
